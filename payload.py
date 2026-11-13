@@ -134,7 +134,9 @@ class Posture:
         if armature is not None:
             mass = mass + np.diag(np.asarray(armature, dtype=float) - self.arm.armature)
         elif (wrist_scale != 1.0 or base_scale != 1.0) and self.arm.armature is not None:
-            scales = np.array([base_scale] * 3 + [wrist_scale] * 3)[: len(self.q)]
+            n = len(self.q)
+            n_wrist = min(3, n)
+            scales = np.array([base_scale] * (n - n_wrist) + [wrist_scale] * n_wrist, dtype=float)
             mass = mass + np.diag((scales - 1.0) * self.arm.armature)
         return self._admittance(mass) @ self.model_inverse
 
@@ -184,7 +186,7 @@ def fit_tool_error(arm, q, model_tool, A, A_se=None, scale=None, floor=0.02, fit
     Their effect on A dwarfs the tool's: with the armature that far off, the tool's mass and centre of mass are not identifiable from A (the fit absorbs what the
     armature's two factors leave in them). With `armature` (one value per joint, e.g. a published table) the arm's own is taken as known, not fitted, and the
     tool's error is found on top of it. `fit_inertia`: the tool's own inertia about its centre scaled, off by default: next to the wrist's armature it moves
-    A by under 1% (geodude identify tool-check shows it). A and its prediction are compared in units of each axis's sweep amplitude (`scale`: six numbers, default linear 1 and angular 4, the sweeps' usual ratio), so that
+    A by under 1%. A and its prediction are compared in units of each axis's sweep amplitude (`scale`: six numbers, default linear 1 and angular 4, the sweeps' usual ratio), so that
     m/rad and rad/m terms weigh alike, each over its standard error but at least `floor`."""
     A = np.asarray(A, dtype=float)
     scale = np.array([1.0] * 3 + [4.0] * 3) if scale is None else np.asarray(scale, dtype=float)

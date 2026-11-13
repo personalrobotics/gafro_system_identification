@@ -82,10 +82,21 @@ def _as_adapter(robot, arm=None):
 
 
 class Sampler:
-    """Reads `adapter.get_state()` every `period` seconds in a thread: rows of (t, q, qd, tau), `t` from `start()`."""
+    """Reads state every `period` seconds in a thread: rows of (t, q, qd, tau), `t` from `start()`.
 
-    def __init__(self, adapter: RobotAdapter, period=0.002):
-        self.adapter, self.period = adapter, period
+    Accepts either `Sampler(adapter, period=0.002)` for a `RobotAdapter` or the legacy `Sampler(interface, indices, period=0.002)`."""
+
+    def __init__(self, adapter_or_interface, indices_or_period=0.002, period=0.002):
+        if isinstance(adapter_or_interface, RobotAdapter):
+            self.adapter = adapter_or_interface
+            self.interface = None
+            self.indices = None
+            self.period = float(indices_or_period)
+        else:
+            self.adapter = None
+            self.interface = adapter_or_interface
+            self.indices = np.asarray(indices_or_period)
+            self.period = float(period)
         self.rows = []
         self._n_joints = None
         self._stop = threading.Event()
@@ -99,10 +110,15 @@ class Sampler:
 
     def _run(self):
         while not self._stop.is_set():
-            state = self.adapter.get_state()
-            q = np.asarray(state.position, dtype=float).ravel()
-            qd = np.asarray(state.velocity, dtype=float).ravel()
-            tau = np.asarray(state.torque, dtype=float).ravel()
+            if self.adapter is not None:
+                state = self.adapter.get_state()
+                q = np.asarray(state.position, dtype=float).ravel()
+                qd = np.asarray(state.velocity, dtype=float).ravel()
+                tau = np.asarray(state.torque, dtype=float).ravel()
+            else:
+                state = self.interface.get_state()
+                take = lambda vector: np.asarray(vector, dtype=float).ravel()[self.indices]  # noqa: E731
+                q, qd, tau = take(state.get_position()), take(state.get_velocity()), take(state.get_torque())
             self._n_joints = q.size
             self.rows.append(np.concatenate([[time.monotonic() - self._origin], q, qd, tau]))
             time.sleep(self.period)
@@ -110,7 +126,12 @@ class Sampler:
     def stop(self):
         self._stop.set()
         self._thread.join()
-        count = self._n_joints if self._n_joints is not None else np.asarray(self.adapter.get_state().position).size
+        if self._n_joints is not None:
+            count = self._n_joints
+        elif self.adapter is not None:
+            count = np.asarray(self.adapter.get_state().position).size
+        else:
+            count = len(self.indices)
         return recording(self.rows, count)
 
 
@@ -124,19 +145,38 @@ def joint_names(count):
     return tuple(str(j + 1) for j in range(count))
 
 
-def go_to(robot, target, play=None, seconds=None, speed=0.3, minimum=2.0, *, arm=None):
-    """Move to the joint vector `target` along a straight line at about `speed` rad/s (at least `minimum` s), by the same `play` arguments."""
-    adapter = _as_adapter(robot, arm)
+def go_to(robot, *args, seconds=None, speed=0.3, minimum=2.0):
+    """Move to the joint vector `target` along a straight line at about `speed` rad/s (at least `minimum` s), by the same `play` arguments.
+
+    Accepts `go_to(adapter, target, play=None, ...)` or legacy `go_to(node, arm, target, play, ...)`."""
+    if isinstance(robot, RobotAdapter):
+        adapter = robot
+        target = args[0]
+        play = args[1] if len(args) > 1 else None
+    else:
+        arm, target = args[0], args[1]
+        play = args[2] if len(args) > 2 else None
+        adapter = GafroNodeAdapter(robot, arm)
     here = np.asarray(adapter.get_state().position, dtype=float).ravel()
     seconds = seconds or max(minimum, float(np.abs(np.asarray(target) - here).max()) / speed)
     return adapter.follow_path([0.0, seconds], [here, np.asarray(target, dtype=float)], **(play or {}))
 
 
-def play_pass(robot, plan, play=None, hold=None, period=0.002, tolerance=0.1, minimum_move=2.0, *, arm=None):
+def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
     """Play one pass, `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it, and read its window from the recording.
 
-    `why` is None when there is a window and otherwise says what happened (what the move reported, or that the joint never held the speed)."""
-    adapter = _as_adapter(robot, arm)
+    `why` is None when there is a window and otherwise says what happened (what the move reported, or that the joint never held the speed).
+    Accepts `play_pass(adapter, plan, play=None, hold=None, ...)` or legacy `play_pass(node, arm, plan, play, hold, ...)`."""
+    if isinstance(robot, RobotAdapter):
+        adapter = robot
+        plan = args[0]
+        play = args[1] if len(args) > 1 else None
+        hold = args[2] if len(args) > 2 else None
+    else:
+        arm, plan = args[0], args[1]
+        play = args[2] if len(args) > 2 else None
+        hold = args[3] if len(args) > 3 else None
+        adapter = GafroNodeAdapter(robot, arm)
     if hold is None:
         hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     first = np.array(hold, dtype=float)
@@ -157,17 +197,25 @@ def play_pass(robot, plan, play=None, hold=None, period=0.002, tolerance=0.1, mi
     return af.Pass(plan.joint, plan.direction, plan.speed, *window), taken, result, None
 
 
-def run(robot, plans, play=None, hold=None, period=0.002, on_pass=None, minimum_move=2.0, *, arm=None):
+def run(robot, *args, hold=None, period=0.002, on_pass=None, minimum_move=2.0):
     """Play every plan; `(played, dropped)` with `played` = [(Pass, Recording)] for `identify_recordings` and `dropped` = [(plan, why)].
 
     The other joints stay where they were when the run began (`hold`, or the measured pose). A move the adapter refuses or stops is not retried:
-    it is dropped with its reason, and the arm has held where it is, so the next pass starts from there."""
-    adapter = _as_adapter(robot, arm)
+    it is dropped with its reason, and the arm has held where it is, so the next pass starts from there.
+    Accepts `run(adapter, plans, play=None, ...)` or legacy `run(node, arm, plans, play, ...)`."""
+    if isinstance(robot, RobotAdapter):
+        adapter = robot
+        plans = args[0]
+        play = args[1] if len(args) > 1 else None
+    else:
+        arm, plans = args[0], args[1]
+        play = args[2] if len(args) > 2 else None
+        adapter = GafroNodeAdapter(robot, arm)
     if hold is None:
         hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     played, dropped = [], []
     for plan in plans:
-        stretch, taken, result, why = play_pass(adapter, plan, play, hold, period, minimum_move=minimum_move)
+        stretch, taken, result, why = play_pass(adapter, plan, play, hold, period=period, minimum_move=minimum_move)
         (played.append((stretch, taken)) if stretch is not None else dropped.append((plan, why)))
         if on_pass:
             on_pass(plan, stretch, why)

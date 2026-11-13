@@ -6,11 +6,15 @@ from scipy import signal
 
 from gafro_system_identification import (
     actuator_friction as af,
+    analysis,
     friction_opt,
     identify,
+    joint_friction as jf,
+    payload,
     response,
     run,
     trace,
+    vibration,
 )
 
 
@@ -136,3 +140,82 @@ def test_identify_plant_diagonal():
     plant = identify.fit_plant(rset, gains, diagonal=True)
     assert np.allclose(plant.A, np.eye(6), atol=1e-2)
     assert plant.tau[0] == pytest.approx(0.01, abs=1e-3)
+
+
+def test_payload_7dof_armature_and_tool_error():
+    n_joints = 7
+
+    def fk(q):
+        pos = np.array([0.3 + 0.1 * q[0] + 0.05 * q[3], 0.2 * q[1] + 0.05 * q[4], 0.4 + 0.15 * q[2] + 0.05 * q[5]])
+        rot = trace.Rotation.from_euler("xyz", [q[4] + 0.2 * q[6], q[5], q[3]]).as_matrix()
+        return pos, rot
+
+    def mass_matrix(q):
+        return np.diag([1.5, 1.4, 1.0, 0.6, 0.2, 0.15, 0.1]) + 0.05 * np.ones((n_joints, n_joints))
+
+    arm = payload.ArmModel(fk=fk, mass_matrix=mass_matrix, armature=np.full(n_joints, 0.08))
+    q0 = np.zeros(n_joints)
+    model_tool = payload.Tool(mass=0.2, com=np.array([0.0, 0.0, 0.05]), inertia=np.eye(3) * 1e-3)
+    real_tool = payload.Tool(mass=0.45, com=np.array([0.02, -0.01, 0.05]), inertia=np.eye(3) * 1e-3)
+
+    posture = payload.Posture(arm, q0, model_tool)
+    a_scaled = posture.gain(real_tool, wrist_scale=1.2, base_scale=0.9)
+    assert a_scaled.shape == (6, 6)
+
+    a_true = payload.loop_gain(arm, q0, model_tool, real_tool)
+    err = payload.fit_tool_error(arm, q0, model_tool, a_true, fit_armature=False)
+    assert err.mass_error == pytest.approx(0.25, abs=1e-2)
+    assert np.allclose(err.com_error, [0.02, -0.01, 0.0], atol=5e-3)
+
+
+def test_joint_friction_7dof_and_vibration():
+    v, c = jf.scales_of("off", n_joints=7)
+    assert v.shape == (7,) and c.shape == (7,)
+
+    wall = np.arange(0.0, 6.0, 1.0 / 500.0)
+    qd = 1e-4 * np.sin(2.0 * np.pi * 2.0 * wall)[:, None] * np.ones((1, 7))
+    qd[wall > 3.5, 2] += 0.08 * np.sin(2.0 * np.pi * 25.0 * wall[wall > 3.5])
+    cycles = vibration.Cycles(
+        wall=wall,
+        period=np.full_like(wall, 0.002),
+        compute=np.full_like(wall, 0.0005),
+        qd=qd,
+        joints=[f"j{i+1}" for i in range(7)],
+    )
+    rep = vibration.analyse(cycles)
+    fast_band = next(b for b in rep.bands if b.name == "fast")
+    assert fast_band.onset is not None
+    assert fast_band.joints[0][0] == "j3"
+
+
+def test_legacy_run_signature_compatibility():
+    class LegacyState:
+        def get_position(self):
+            return np.zeros(7)
+
+        def get_velocity(self):
+            return np.full(7, 0.2)
+
+        def get_torque(self):
+            return np.full(7, 0.5)
+
+    class LegacyInterface:
+        def get_state(self):
+            return LegacyState()
+
+    class LegacyNode:
+        def __init__(self):
+            self.interface = LegacyInterface()
+            self.controlled = {"left": np.arange(7)}
+
+        def follow_path(self, arm, times, positions, velocities=None, **play):
+            import time
+            time.sleep(0.02)
+            return run.FollowResult(ok=True, status="OK")
+
+    node = LegacyNode()
+    plan = af.PassPlan(joint=0, direction=1, speed=0.2, start=0.0, constant=0.02, ramp=0.005)
+    played, dropped = run.run(node, "left", [plan], {}, period=0.001, minimum_move=0.005)
+    assert not dropped
+    assert len(played) == 1
+

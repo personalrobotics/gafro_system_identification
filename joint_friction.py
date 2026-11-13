@@ -39,24 +39,24 @@ def published_joint_side(joint):
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3")
 
 
-def scales_of(entry):
-    """(viscous, coulomb) per joint that the configuration commanded: `off`, or {viscous: [6], coulomb: [6]}.
+def scales_of(entry, n_joints=6):
+    """(viscous, coulomb) per joint that the configuration commanded: `off`, or {viscous: [n_joints], coulomb: [n_joints]}.
 
     `robot` has none. The controller chose them, and they are not a measured parameter."""
     if isinstance(entry, dict):
         return np.asarray(entry["viscous"], dtype=float), np.asarray(entry["coulomb"], dtype=float)
     if entry == "off" or entry is False:  # YAML reads a bare `off` as false; the driver treats that as off too
-        return np.zeros(6), np.zeros(6)
+        return np.zeros(n_joints), np.zeros(n_joints)
     if entry == "robot":
         raise ValueError("friction_compensation robot: the controller chose the scales; they were not commanded and are not known")
     raise ValueError(f"friction_compensation {entry!r}: expected off, robot, or {{viscous: [...], coulomb: [...]}}")
 
 
-def commanded_scales(entry):
+def commanded_scales(entry, n_joints=6):
     """(viscous, coulomb) the configuration sent, or None for `robot`."""
     if entry == "robot":
         return None
-    return scales_of(entry)
+    return scales_of(entry, n_joints=n_joints)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,17 +77,17 @@ def read_cycles(path):
     return names, np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
 
 
-def steady_state(names, cycles, group, stretch, middle=0.5):
+def steady_state(names, cycles, group, stretch, middle=0.5, joint_names=JOINTS):
     """(mean command, mean velocity, torque std, samples) of `stretch`'s middle `middle` share, for the joint it drove.
 
-    `group` is the control group's name (`right_ur5e`); the columns are `command_<group>/<joint>_joint` and `qd_<...>`."""
-    suffix = f"{group}/{JOINTS[stretch.joint]}_joint"
+    `group` is the control group's name (e.g. `right_ur5e`); the columns are `command_<group>/<joint>_joint` and `qd_<...>`."""
+    suffix = f"{group}/{joint_names[stretch.joint]}_joint"
     command, velocity = names.index(f"command_{suffix}"), names.index(f"qd_{suffix}")
     stamp = cycles[:, names.index("wall_time")]
     length = stretch.end - stretch.begin
     keep = (stamp >= stretch.begin + 0.5 * (1.0 - middle) * length) & (stamp <= stretch.end - 0.5 * (1.0 - middle) * length)
     if keep.sum() < 10:
-        raise ValueError(f"joint {JOINTS[stretch.joint]}, {stretch.direction:+d} {stretch.speed} rad/s: {int(keep.sum())} cycles in the window")
+        raise ValueError(f"joint {joint_names[stretch.joint]}, {stretch.direction:+d} {stretch.speed} rad/s: {int(keep.sum())} cycles in the window")
     return float(cycles[keep, command].mean()), float(cycles[keep, velocity].mean()), float(cycles[keep, command].std()), int(keep.sum())
 
 
@@ -110,12 +110,12 @@ def fit_coulomb_viscous(speeds, friction):
     return float(coulomb), float(viscous), rms, float(spread[0]), float(spread[1])
 
 
-def friction_table(names, cycles, group, passes, tolerance=0.25):
+def friction_table(names, cycles, group, passes, tolerance=0.25, joint_names=JOINTS):
     """Per joint: the measurements and the fit. `passes` are Pass objects, forwards and back at each speed.
 
     A forward and a back pass are matched by (joint, speed). A pair whose measured speed is more than `tolerance` off the commanded one, in
     either direction, is dropped and listed: the joint did not move at the speed the model assumes there."""
-    return friction_table_with(passes, lambda stretch: steady_state(names, cycles, group, stretch), tolerance)
+    return friction_table_with(passes, lambda stretch: steady_state(names, cycles, group, stretch, joint_names=joint_names), tolerance)
 
 
 def friction_table_with(passes, read, tolerance=0.25):

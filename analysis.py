@@ -15,7 +15,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from gafro_system_identification.response import FrequencyResponse, fit_second_order, frequency_response, plot_bode, tone_response
-from gafro_system_identification.trace import DOFS, coupling, joint_columns, measured_displacements, read_trace, reference_times
+from gafro_system_identification.trace import (
+    DOFS,
+    coupling,
+    joint_columns,
+    measured_displacements,
+    measured_displacements_with,
+    read_trace,
+    reference_times,
+)
 
 FIGURE_DOFS = ("x", "y", "z")
 
@@ -80,6 +88,14 @@ def analyse_arrays(record, wall, displacements, **options):
     return results
 
 
+def analyse_with_fk(record, cycles_path, columns, fk, origin_position, origin_matrix, **options):
+    """The analysis of `record` from the cycle log at `cycles_path` using a generic `fk(q) -> (position, rotation_matrix)` callable and origin pose,
+    without requiring a gafro System or task space."""
+    trace = read_trace(cycles_path, ["wall_time"] + list(columns))
+    displacements = measured_displacements_with(trace, columns, fk, origin_position, origin_matrix)
+    return analyse_arrays(record, trace["wall_time"], displacements, **options)
+
+
 def analyse(record, cycles_path, system, task_space, **options):
     """The analysis of `record` from the cycle log at `cycles_path`: the logged joint positions of the arm of `task_space` are put through its forward
     kinematics, as displacements from the record's origin, then analysed (analyse_arrays)."""
@@ -91,7 +107,7 @@ def analyse(record, cycles_path, system, task_space, **options):
 
 def analyse_files(record, cycles_path, model=None, **options):
     """`analyse`, with the kinematics from a model loaded for the purpose (a kinematic RobotInterface, no robot, no simulation): the record's
-    model unless `model` is given. How an experiment analyses its run once the robot is stopped, and how geodude identify analyse analyses a recorded
+    model unless `model` is given. How an experiment analyses its run once the robot is stopped, and how CLI tools analyse a recorded
     one -- one path for both."""
     import gafro_robot_interface as ri
 
