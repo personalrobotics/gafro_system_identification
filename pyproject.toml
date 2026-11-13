@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gafro_system_identification"
+version = "0.1.0"
+description = "Robot-agnostic system identification for manipulators: joint friction, task-space frequency response, inertia/payload mismatch, and stability margins."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["gafro_system_identification"]
+
+[tool.setuptools.package-dir]
+gafro_system_identification = "."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

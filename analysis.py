@@ -1,5 +1,6 @@
 """The analysis of an experiment run: the response of the end effector's pose to the reference that was run, from the control cycle log and the
-run's record (a record object with `segments`, `origin()`, `model`, `arm`: geodude_teleoperation.record is one). The same functions are called at the end of an experiment and by geodude identify analyse on data recorded earlier.
+run's record (a record object with `segments`, `origin()`, `model`, `arm`). The same functions are called at the end of an experiment and by CLI
+analysis tools on data recorded earlier.
 
 Each segment of a record is analysed by what it is. A sweep (a chirp along or about one axis) gives the response over a band of frequencies by the
 lock-in estimate of response.py. A figure eight is three tones -- x at 1/period, y at twice that, z at `heave_cycles` times it -- so its response is

@@ -1,4 +1,4 @@
-"""SPSA (simultaneous-perturbation stochastic approximation) of UR direct_torque friction scales.
+"""SPSA (simultaneous-perturbation stochastic approximation) of N-joint direct_torque friction scales (e.g. UR, OpenArm).
 
 Chirp metric: free-space response_pose (off-axis, quality, gain, delay).
 Path metric: figure-eight PathRecorder summary (RMS, lag) plus y→rx and rotation as vibration proxies.
@@ -17,16 +17,26 @@ from gafro_system_identification.response import fit_second_order
 from gafro_system_identification.trace import coupling
 
 N_JOINTS = 6
-N_PARAMS = 2 * N_JOINTS  # viscous then coulomb
+N_PARAMS = 2 * N_JOINTS  # viscous then coulomb (default for 6-DOF callers; pass n_joints to unpack for N-DOF)
 
 
 def pack(viscous, coulomb):
-    return np.concatenate([np.asarray(viscous, dtype=float), np.asarray(coulomb, dtype=float)])
+    v = np.asarray(viscous, dtype=float)
+    c = np.asarray(coulomb, dtype=float)
+    if v.shape != c.shape or v.ndim != 1:
+        raise ValueError(f"viscous and coulomb must be 1-D arrays of equal length, got {v.shape} and {c.shape}")
+    return np.concatenate([v, c])
 
 
-def unpack(theta):
-    theta = np.asarray(theta, dtype=float).reshape(N_PARAMS)
-    return theta[:N_JOINTS].copy(), theta[N_JOINTS:].copy()
+def unpack(theta, n_joints=None):
+    theta = np.asarray(theta, dtype=float).ravel()
+    if n_joints is None:
+        if theta.size % 2 != 0:
+            raise ValueError(f"theta length must be even when n_joints is omitted, got {theta.size}")
+        n_joints = theta.size // 2
+    elif theta.size != 2 * n_joints:
+        raise ValueError(f"expected {2 * n_joints} parameters for {n_joints} joints, got {theta.size}")
+    return theta[:n_joints].copy(), theta[n_joints:].copy()
 
 
 def clip_scales(theta, lo=0.0, hi=1.0):

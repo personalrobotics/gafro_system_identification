@@ -1,29 +1,93 @@
-"""Friction passes played through a `gafro_control_nodes.RobotNode` in this process, each recorded from the robot's own state.
+"""Friction passes played through a transport-agnostic `RobotAdapter`, each recorded from the robot's own state.
 
-This is the glue, not a second client: the paths are `actuator_friction`'s, the playing, refusals and outcome are `RobotNode.follow_path`'s, the
-state is the interface's `SystemState` (position, velocity and torque, the same one `<arm>/state` carries), and the fit is `identify_recordings`.
-Nothing here imports gafro or control-nodes at module level: the node is handed in, so the package's analysis still imports without them.
+This is the glue, not a second client: the paths are `actuator_friction`'s, the playing, refusals and outcome are the adapter's `follow_path`,
+the state is `JointState` (position, velocity and torque), and the fit is `identify_recordings`. Nothing here imports gafro, control-nodes,
+ROS 2, or Dora: any transport plugs in by implementing `RobotAdapter` (two methods: `get_state` and `follow_path`).
 
-A node in another process (the OpenArm's service) is reached through the same channels, `<arm>/<input>/trajectory`, `<arm>/mode` and
-`<arm>/state`; that client is not here yet. What is shared with it is the part that matters: a pass is played from its first pose, the state is
-recorded as `t, q1.., qd1.., tau1..` with `t` from the start of the recording, and the steady window is found in the recording from the joint's
-own velocity (`steady_window`), so no clock has to be shared with the player.
+`GafroNodeAdapter` wraps an in-process `gafro_control_nodes.RobotNode` for one arm. An out-of-process client (e.g. OpenArm over Dora or ROS 2
+channels `<arm>/<input>/trajectory`, `<arm>/mode`, `<arm>/state`) implements the same `RobotAdapter` protocol. What is shared across all
+transports is the part that matters: a pass is played from its first pose, the state is recorded as `t, q1.., qd1.., tau1..` with `t` from
+the start of the recording, and the steady window is found in the recording from the joint's own velocity (`steady_window`), so no clock
+has to be shared with the player.
 """
 
+from dataclasses import dataclass
 import threading
 import time
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 
 from gafro_system_identification import actuator_friction as af
 
 
-class Sampler:
-    """Reads the interface's state every `period` seconds in a thread: rows of (t, q, qd, tau) of the `indices` joints, `t` from `start()`."""
+@dataclass(frozen=True)
+class JointState:
+    """One sample of an arm's N joints: position (rad), velocity (rad/s), and measured torque (N m)."""
 
-    def __init__(self, interface, indices, period=0.002):
-        self.interface, self.indices, self.period = interface, np.asarray(indices), period
+    position: np.ndarray
+    velocity: np.ndarray
+    torque: np.ndarray
+
+
+@dataclass(frozen=True)
+class FollowResult:
+    """Outcome of a trajectory playback request."""
+
+    ok: bool
+    status: str = ""
+    message: str = ""
+
+
+@runtime_checkable
+class RobotAdapter(Protocol):
+    """Minimal interface a robot or middleware transport implements to run friction passes."""
+
+    def get_state(self) -> JointState:
+        """Current `(position, velocity, torque)` of the controlled arm's N joints."""
+        ...
+
+    def follow_path(self, times, positions, velocities=None, **play) -> FollowResult:
+        """Play a joint-space trajectory `(times, positions[, velocities])` and return its `FollowResult`."""
+        ...
+
+
+class GafroNodeAdapter:
+    """Wraps an in-process `gafro_control_nodes.RobotNode` and arm name as a `RobotAdapter`."""
+
+    def __init__(self, node, arm):
+        self.node = node
+        self.arm = arm
+        self.indices = np.asarray(node.controlled[arm])
+
+    def get_state(self) -> JointState:
+        state = self.node.interface.get_state()
+        take = lambda vector: np.asarray(vector, dtype=float).ravel()[self.indices]  # noqa: E731
+        return JointState(take(state.get_position()), take(state.get_velocity()), take(state.get_torque()))
+
+    def follow_path(self, times, positions, velocities=None, **play) -> FollowResult:
+        if velocities is None:
+            result = self.node.follow_path(self.arm, times, positions, **play)
+        else:
+            result = self.node.follow_path(self.arm, times, positions, velocities, **play)
+        return FollowResult(ok=bool(result.ok), status=str(result.status), message=str(result.message))
+
+
+def _as_adapter(robot, arm=None):
+    if isinstance(robot, RobotAdapter):
+        return robot
+    if arm is None:
+        raise TypeError("pass a RobotAdapter instance, or (node, arm) for a gafro_control_nodes.RobotNode")
+    return GafroNodeAdapter(robot, arm)
+
+
+class Sampler:
+    """Reads `adapter.get_state()` every `period` seconds in a thread: rows of (t, q, qd, tau), `t` from `start()`."""
+
+    def __init__(self, adapter: RobotAdapter, period=0.002):
+        self.adapter, self.period = adapter, period
         self.rows = []
+        self._n_joints = None
         self._stop = threading.Event()
         self._thread = None
 
@@ -35,20 +99,23 @@ class Sampler:
 
     def _run(self):
         while not self._stop.is_set():
-            state = self.interface.get_state()
-            take = lambda vector: np.asarray(vector, dtype=float).ravel()[self.indices]  # noqa: E731
-            self.rows.append(np.concatenate([[time.monotonic() - self._origin], take(state.get_position()), take(state.get_velocity()),
-                                             take(state.get_torque())]))
+            state = self.adapter.get_state()
+            q = np.asarray(state.position, dtype=float).ravel()
+            qd = np.asarray(state.velocity, dtype=float).ravel()
+            tau = np.asarray(state.torque, dtype=float).ravel()
+            self._n_joints = q.size
+            self.rows.append(np.concatenate([[time.monotonic() - self._origin], q, qd, tau]))
             time.sleep(self.period)
 
     def stop(self):
         self._stop.set()
         self._thread.join()
-        return recording(self.rows, len(self.indices))
+        count = self._n_joints if self._n_joints is not None else np.asarray(self.adapter.get_state().position).size
+        return recording(self.rows, count)
 
 
 def recording(rows, count):
-    """The rows as an `actuator_friction.Recording` with the columns `t`, `q1..`, `qd1..`, `tau1..` (the OpenArm service's names)."""
+    """The rows as an `actuator_friction.Recording` with the columns `t`, `q1..`, `qd1..`, `tau1..`."""
     names = ["t"] + [f"{kind}{j + 1}" for kind in ("q", "qd", "tau") for j in range(count)]
     return af.Recording(names, np.asarray(rows, dtype=float).reshape(-1, 1 + 3 * count))
 
@@ -57,26 +124,30 @@ def joint_names(count):
     return tuple(str(j + 1) for j in range(count))
 
 
-def go_to(node, arm, target, play, seconds=None, speed=0.3, minimum=2.0):
-    """Move `arm` to the joint vector `target` along a straight line at about `speed` rad/s (at least `minimum` s), by the same `play` arguments."""
-    here = np.asarray(node.interface.get_state().get_position(), dtype=float).ravel()[node.controlled[arm]]
+def go_to(robot, target, play=None, seconds=None, speed=0.3, minimum=2.0, *, arm=None):
+    """Move to the joint vector `target` along a straight line at about `speed` rad/s (at least `minimum` s), by the same `play` arguments."""
+    adapter = _as_adapter(robot, arm)
+    here = np.asarray(adapter.get_state().position, dtype=float).ravel()
     seconds = seconds or max(minimum, float(np.abs(np.asarray(target) - here).max()) / speed)
-    return node.follow_path(arm, [0.0, seconds], [here, np.asarray(target, dtype=float)], **play)
+    return adapter.follow_path([0.0, seconds], [here, np.asarray(target, dtype=float)], **(play or {}))
 
 
-def play_pass(node, arm, plan, play, hold, period=0.002, tolerance=0.1, minimum_move=2.0):
+def play_pass(robot, plan, play=None, hold=None, period=0.002, tolerance=0.1, minimum_move=2.0, *, arm=None):
     """Play one pass, `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it, and read its window from the recording.
 
     `why` is None when there is a window and otherwise says what happened (what the move reported, or that the joint never held the speed)."""
+    adapter = _as_adapter(robot, arm)
+    if hold is None:
+        hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     first = np.array(hold, dtype=float)
     first[plan.joint] = plan.start
-    moved = go_to(node, arm, first, play, minimum=minimum_move)
+    moved = go_to(adapter, first, play, minimum=minimum_move)
     if not moved.ok:
         return None, None, moved, f"going to the first pose: {moved.status} {moved.message}"
     times, positions, rates, _ = af.pass_path(plan, hold)
-    sampler = Sampler(node.interface, node.controlled[arm], period).start()
+    sampler = Sampler(adapter, period).start()
     try:
-        result = node.follow_path(arm, times, positions, rates, **play)
+        result = adapter.follow_path(times, positions, rates, **(play or {}))
     finally:
         taken = sampler.stop()
     column = taken.names.index(f"qd{plan.joint + 1}")
@@ -86,17 +157,17 @@ def play_pass(node, arm, plan, play, hold, period=0.002, tolerance=0.1, minimum_
     return af.Pass(plan.joint, plan.direction, plan.speed, *window), taken, result, None
 
 
-def run(node, arm, plans, play, hold=None, period=0.002, on_pass=None, minimum_move=2.0):
+def run(robot, plans, play=None, hold=None, period=0.002, on_pass=None, minimum_move=2.0, *, arm=None):
     """Play every plan; `(played, dropped)` with `played` = [(Pass, Recording)] for `identify_recordings` and `dropped` = [(plan, why)].
 
-    The other joints stay where they were when the run began (`hold`, or the measured pose). A move the node refuses or stops is not retried:
+    The other joints stay where they were when the run began (`hold`, or the measured pose). A move the adapter refuses or stops is not retried:
     it is dropped with its reason, and the arm has held where it is, so the next pass starts from there."""
-    count = len(node.controlled[arm])
+    adapter = _as_adapter(robot, arm)
     if hold is None:
-        hold = np.asarray(node.interface.get_state().get_position(), dtype=float).ravel()[node.controlled[arm]]
+        hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     played, dropped = [], []
     for plan in plans:
-        stretch, taken, result, why = play_pass(node, arm, plan, play, hold, period, minimum_move=minimum_move)
+        stretch, taken, result, why = play_pass(adapter, plan, play, hold, period, minimum_move=minimum_move)
         (played.append((stretch, taken)) if stretch is not None else dropped.append((plan, why)))
         if on_pass:
             on_pass(plan, stretch, why)

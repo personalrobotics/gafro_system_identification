@@ -1,17 +1,17 @@
 """Where a vibration starts and what it is tied to, from the robot interface's control cycle log and the teleop's tick log.
 
-Two logs, one clock (CLOCK_MONOTONIC). The cycle log (`RobotInterface.record_diagnostics(trace=True)`) has every control cycle's `wall_time`, its `period`
+Two logs, one clock (CLOCK_MONOTONIC). The cycle log (`record_diagnostics(trace=True)`) has every control cycle's `wall_time`, its `period`
 and `compute` (the control loop's own timing: a loop that stalls delays the command *inside* the feedback loop) and the arm's `qd_<joint>`. The tick log
-(`geodude-teleop --trace`) has every device tick of the teleop: when it began, how late, how long its Python work took, and the command it acted on.
+has every device tick of the teleop: when it began, how late, how long its Python work took, and the command it acted on.
 
 What it tells apart:
   * Where the vibration is: the band of frequencies (slow hunting, a mid band, a fast one), its dominant frequency and the joints that carry it, and when
     it began.
-  * Whether the device is behind it: the device's commands (active: the SpaceMouse is deflected, idle: it is not) against the onset, and whether the
+  * Whether the device is behind it: the device's commands (active: the input device is deflected, idle: it is not) against the onset, and whether the
     vibration goes on after the device has been idle. Nothing the device or the reference path does after it goes idle can keep a vibration going: the
     reference does not move (the leash acts only on a lagging arm), so what continues is the loop itself.
   * Whether the loop's timing changes with the device: the control cycles' period and compute while it is active against while it is idle. A control loop
-    that slows or stalls when the SpaceMouse is read (a Python law in the loop, contending for the interpreter lock) is a command delay inside the
+    that slows or stalls when the input device is read (a Python law in the loop, contending for the interpreter lock) is a command delay inside the
     feedback loop; the reference path's own jitter (the tick log's lateness) is not, since it is outside it: it excites, it cannot destabilise.
 """
 

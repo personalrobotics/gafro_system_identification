@@ -1,8 +1,8 @@
 """Reading a run's trace: the cycle log of a robot interface, the pose read off it, and the reference's time rebuilt from a publish log.
 
 The six degrees of freedom of the pose, in the order of the displacements below, are a translation along a world axis (m) or a rotation about a world axis
-through the end effector's origin (rad). Nothing here needs a robot: `joint_columns` and `measured_displacements` take a gafro System and task space (or anything
-with their methods) as arguments.
+through the end effector's origin (rad). Nothing here needs a robot: `measured_displacements_with` takes any `fk(q) -> (position, rotation_matrix)`
+callable, and `joint_columns` / `measured_displacements` wrap a gafro System and task space when present.
 """
 
 import numpy as np
@@ -41,17 +41,34 @@ def joint_columns(system, task_space):
     return ["q_" + names[int(i)] for i in task_space.get_joint_indices()]
 
 
-def measured_displacements(trace, columns, task_space, origin):
-    """The end effector's displacement from `origin` at every sample of a trace read by `read_trace`, as (N, 6) in the order of DOFS: the
-    position difference in the world frame (m), then the rotation vector of R R_origin^T (rad), also in the world frame."""
-    origin_position = np.asarray(origin.get_translator().to_translation_vector(), dtype=float)
-    origin_matrix = np.asarray(origin.get_rotor().to_rotation_matrix(), dtype=float)
+def measured_displacements_with(trace, columns, fk, origin_position, origin_matrix):
+    """The end effector's displacement from `(origin_position, origin_matrix)` at every sample of a trace read by `read_trace`, as (N, 6) in the order
+    of DOFS: the position difference in the world frame (m), then the rotation vector of R R_origin^T (rad), also in the world frame.
+
+    `fk(q)` returns `(position, rotation_matrix)` for the joint vector `q` (same signature as `payload.ArmModel.fk`)."""
+    origin_position = np.asarray(origin_position, dtype=float)
+    origin_matrix = np.asarray(origin_matrix, dtype=float)
     joints = np.column_stack([trace[c] for c in columns])
-    motors = [task_space.compute_ee_motor(q) for q in joints]
-    position = np.array([m.get_translator().to_translation_vector() for m in motors], dtype=float)
-    matrices = np.array([m.get_rotor().to_rotation_matrix() for m in motors], dtype=float)
+    poses = [fk(q) for q in joints]
+    position = np.array([p for p, _ in poses], dtype=float)
+    matrices = np.array([r for _, r in poses], dtype=float)
     rotation = Rotation.from_matrix(matrices @ origin_matrix.T).as_rotvec()
     return np.hstack([position - origin_position, rotation])
+
+
+def measured_displacements(trace, columns, task_space, origin):
+    """The end effector's displacement from `origin` at every sample of a trace read by `read_trace`, using a gafro `task_space` and `origin` motor."""
+    def fk(q):
+        motor = task_space.compute_ee_motor(q)
+        return motor.get_translator().to_translation_vector(), motor.get_rotor().to_rotation_matrix()
+
+    return measured_displacements_with(
+        trace,
+        columns,
+        fk,
+        origin.get_translator().to_translation_vector(),
+        origin.get_rotor().to_rotation_matrix(),
+    )
 
 
 def coupling(responses, dof, minimum_quality=0.5):
