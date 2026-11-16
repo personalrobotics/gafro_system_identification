@@ -21,6 +21,7 @@ N_PARAMS = 2 * N_JOINTS  # viscous then coulomb (default for 6-DOF callers; pass
 
 
 def pack(viscous, coulomb):
+    """Concatenate equal-length 1-D arrays `viscous` and `coulomb` (in [0, 1]) into a single 2N-element parameter vector."""
     v = np.asarray(viscous, dtype=float)
     c = np.asarray(coulomb, dtype=float)
     if v.shape != c.shape or v.ndim != 1:
@@ -29,6 +30,7 @@ def pack(viscous, coulomb):
 
 
 def unpack(theta, n_joints=None):
+    """Split a 2N-element parameter vector `theta` into `(viscous, coulomb)` 1-D arrays of length `n_joints` (inferred as `len(theta) // 2` if None)."""
     theta = np.asarray(theta, dtype=float).ravel()
     if n_joints is None:
         if theta.size % 2 != 0:
@@ -90,7 +92,9 @@ class PathTrialMetrics:
 
 def metrics_from_results(results, dof="z",
                          w_off=1.0, w_quality=0.25, w_gain=0.1, w_delay=0.1, delay_ref_ms=50.0):
-    """Scalar cost from a response_pose analysis of a single-DOF sweep (default z)."""
+    """Scalar cost from an `analysis` result list (`SegmentAnalysis` items) containing a sweep of `dof` (in `trace.DOFS`, default `"z"`).
+
+    Weights `w_*` are >= 0 and `delay_ref_ms` > 0."""
     for result in results:
         if result.tones:
             continue
@@ -143,7 +147,8 @@ def path_cost(summary, y_to_rx=0.0,
               pos_ref_mm=2.0, lag_ref_ms=100.0, rot_ref_deg=0.5, coup_ref=0.35,
               w_rot=1.5, w_coup=1.0,
               rot_peak_reject_deg=1.2, pos_peak_reject_mm=8.0):
-    """Cost from a PathRecorder figures summary plus y→rx. Hard-rejects vibrating trials."""
+    """Cost from a `PathRecorder` figures `summary` dict (keys `position_rms_mm`, `position_peak_mm`, `lag_ms`, `rotation_rms_deg`,
+    `rotation_peak_deg`; or empty/falsy for a failed run) plus `y_to_rx` (>= 0, rad/m). Positive reference scales `*_ref_*`; hard-rejects vibrating trials."""
     if not summary:
         return PathTrialMetrics(
             position_rms_mm=float("nan"), position_peak_mm=float("nan"), lag_ms=float("nan"),
@@ -172,7 +177,8 @@ def path_cost(summary, y_to_rx=0.0,
 
 
 def spsa_step(z, cost_plus, cost_minus, k, a=0.15, c=0.08, A=5.0, alpha=0.602, gamma=0.101, seed=None):
-    """One SPSA update in logit space. `cost_plus` / `cost_minus` are L(z + c_k Δ) / L(z - c_k Δ)."""
+    """One SPSA update in logit space on 1-D vector `z` at iteration `k` (>= 0). `cost_plus` and `cost_minus` are scalar losses `L(z + c_k Δ)` and
+    `L(z - c_k Δ)`; `a, c, A, alpha, gamma` > 0 are the standard SPSA gain-schedule hyperparameters."""
     rng = np.random.default_rng(seed)
     ck = c / ((k + 1) ** gamma)
     ak = a / ((k + 1 + A) ** alpha)

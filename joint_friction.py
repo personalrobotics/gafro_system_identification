@@ -63,11 +63,11 @@ def commanded_scales(entry, n_joints=6):
 class Pass:
     """One constant-speed stretch of one joint: where it began and ended on the cycle log's clock (CLOCK_MONOTONIC), and what was commanded."""
 
-    joint: int  # 0..5, along the arm
+    joint: int  # 0-based index into joint_names
     direction: int  # +1 or -1
-    speed: float  # rad/s, positive
-    begin: float  # the constant-speed part, s
-    end: float
+    speed: float  # rad/s, strictly positive
+    begin: float  # start of the constant-speed part, s (< end)
+    end: float  # end of the constant-speed part, s
 
 
 def read_cycles(path):
@@ -78,9 +78,10 @@ def read_cycles(path):
 
 
 def steady_state(names, cycles, group, stretch, middle=0.5, joint_names=JOINTS):
-    """(mean command, mean velocity, torque std, samples) of `stretch`'s middle `middle` share, for the joint it drove.
+    """(mean command, mean velocity, torque std, samples) of `stretch`'s middle `middle` (in (0, 1]) share, for the joint it drove.
 
-    `group` is the control group's name (e.g. `right_ur5e`); the columns are `command_<group>/<joint>_joint` and `qd_<...>`."""
+    `names` is the list of CSV column names, `cycles` is the (N, cols) array, `group` is the control group's name (e.g. `right_ur5e`; columns
+    `command_<group>/<joint>_joint` and `qd_<...>`), `stretch` is a `Pass`, and `joint_names` is indexed by `stretch.joint`."""
     suffix = f"{group}/{joint_names[stretch.joint]}_joint"
     command, velocity = names.index(f"command_{suffix}"), names.index(f"qd_{suffix}")
     stamp = cycles[:, names.index("wall_time")]
@@ -94,8 +95,9 @@ def steady_state(names, cycles, group, stretch, middle=0.5, joint_names=JOINTS):
 def fit_coulomb_viscous(speeds, friction):
     """(coulomb, viscous, rms, coulomb standard error, viscous standard error) of `friction = c + b speed`.
 
-    `c` and `b` are free, so an over-compensated joint comes out negative instead of being clamped to zero. The standard
-    errors are from the least-squares covariance; with only two speeds there is no spare point and they are NaN."""
+    `speeds` (rad/s, > 0) and `friction` (N m) are 1-D arrays of equal length >= 2. `c` and `b` are free, so an over-compensated joint comes out
+    negative instead of being clamped to zero. The standard errors are from the least-squares covariance; with only two speeds there is no spare
+    point and they are NaN."""
     speeds, friction = np.asarray(speeds, dtype=float), np.asarray(friction, dtype=float)
     design = np.column_stack([np.ones_like(speeds), speeds])
     coulomb, viscous = np.linalg.lstsq(design, friction, rcond=None)[0]
@@ -165,12 +167,13 @@ def removed(off, on):
 
 
 def recommend(off, on, on_scales, margin=1.0):
-    """The compensation scales from a run with it off (`off`: a `friction_table`) and one with it on at commanded `on_scales` = (viscous, coulomb).
+    """The compensation scales from a run with it off (`off`: a `friction_table`) and one with it on at commanded `on_scales` = (viscous, coulomb)
+    (each a sequence indexed by joint index, values in [0, 1]).
 
     `on_scales` are the numbers written in the configuration for that run. Per joint, c_UR and b_UR are what one unit of that scale removed,
     `(off - on) / scale`, with the on-run coefficients signed, so a negative residual counts as compensation that went past the friction.
     The scale that cancels it is `c / c_UR` and `b / b_UR`, stored as `coulomb_ideal` and `viscous_ideal`. The returned `coulomb` and `viscous`
-    are that scale times `margin`, kept in [0, 1]: that is the range `direct_torque` accepts. A joint without a fit in both runs is left out."""
+    are that scale times `margin` (> 0), kept in [0, 1]: that is the range `direct_torque` accepts. A joint without a fit in both runs is left out."""
     viscous_on, coulomb_on = on_scales
     out = {}
     for joint, measured in off.items():

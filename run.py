@@ -48,7 +48,7 @@ class RobotAdapter(Protocol):
         ...
 
     def follow_path(self, times, positions, velocities=None, **play) -> FollowResult:
-        """Play a joint-space trajectory `(times, positions[, velocities])` and return its `FollowResult`."""
+        """Play a joint-space trajectory (`times` (T,) s, `positions` (T, N) rad[, `velocities` (T, N) rad/s], `**play` transport options) and return its `FollowResult`."""
         ...
 
 
@@ -82,9 +82,10 @@ def _as_adapter(robot, arm=None):
 
 
 class Sampler:
-    """Reads state every `period` seconds in a thread: rows of (t, q, qd, tau), `t` from `start()`.
+    """Reads state every `period` (> 0, s) seconds in a thread: rows of (t, q, qd, tau), `t` from `start()`.
 
-    Accepts either `Sampler(adapter, period=0.002)` for a `RobotAdapter` or the legacy `Sampler(interface, indices, period=0.002)`."""
+    Accepts either `Sampler(adapter, period=0.002)` for a `RobotAdapter` or the legacy `Sampler(interface, indices, period=0.002)`
+    where `indices` is a sequence of 0-based joint indices into `interface.get_state()` vectors."""
 
     def __init__(self, adapter_or_interface, indices_or_period=0.002, period=0.002):
         if isinstance(adapter_or_interface, RobotAdapter):
@@ -146,7 +147,8 @@ def joint_names(count):
 
 
 def go_to(robot, *args, seconds=None, speed=0.3, minimum=2.0):
-    """Move to the joint vector `target` along a straight line at about `speed` rad/s (at least `minimum` s), by the same `play` arguments.
+    """Move to the joint vector `target` ((N,) rad) along a straight line at about `speed` (> 0, rad/s) (at least `minimum` > 0 s, or exact
+    `seconds` > 0), forwarding `play` (dict or None) kwargs to `follow_path`.
 
     Accepts `go_to(adapter, target, play=None, ...)` or legacy `go_to(node, arm, target, play, ...)`."""
     if isinstance(robot, RobotAdapter):
@@ -163,10 +165,12 @@ def go_to(robot, *args, seconds=None, speed=0.3, minimum=2.0):
 
 
 def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
-    """Play one pass, `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it, and read its window from the recording.
+    """Play one `actuator_friction.PassPlan`, returning `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it while
+    sampling at `period` (> 0, s), and read its steady window with relative `tolerance` (> 0).
 
-    `why` is None when there is a window and otherwise says what happened (what the move reported, or that the joint never held the speed).
-    Accepts `play_pass(adapter, plan, play=None, hold=None, ...)` or legacy `play_pass(node, arm, plan, play, hold, ...)`."""
+    `hold` is the (N,) joint vector (rad) for un-driven joints (None samples current position); `play` is a dict or None of `follow_path` kwargs;
+    `minimum_move` (> 0, s) is the minimum duration for moving to the start pose. `why` is None when there is a window and otherwise says what
+    happened. Accepts `play_pass(adapter, plan, play=None, hold=None, ...)` or legacy `play_pass(node, arm, plan, play, hold, ...)`."""
     if isinstance(robot, RobotAdapter):
         adapter = robot
         plan = args[0]
@@ -198,11 +202,13 @@ def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
 
 
 def run(robot, *args, hold=None, period=0.002, on_pass=None, minimum_move=2.0):
-    """Play every plan; `(played, dropped)` with `played` = [(Pass, Recording)] for `identify_recordings` and `dropped` = [(plan, why)].
+    """Play every `actuator_friction.PassPlan` in `plans`; returns `(played, dropped)` with `played` = [(Pass, Recording)] for
+    `identify_recordings` and `dropped` = [(plan, why)].
 
-    The other joints stay where they were when the run began (`hold`, or the measured pose). A move the adapter refuses or stops is not retried:
-    it is dropped with its reason, and the arm has held where it is, so the next pass starts from there.
-    Accepts `run(adapter, plans, play=None, ...)` or legacy `run(node, arm, plans, play, ...)`."""
+    The other joints stay where they were when the run began (`hold` (N,) rad, or the measured pose if None). `play` is a dict or None of
+    `follow_path` kwargs; `period` (> 0, s) is the sampler interval; `on_pass(plan, stretch_or_none, why_or_none)` is an optional callback after
+    each pass. A move the adapter refuses or stops is not retried: it is dropped with its reason, and the arm has held where it is, so the next
+    pass starts from there. Accepts `run(adapter, plans, play=None, ...)` or legacy `run(node, arm, plans, play, ...)`."""
     if isinstance(robot, RobotAdapter):
         adapter = robot
         plans = args[0]

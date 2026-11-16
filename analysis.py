@@ -55,8 +55,11 @@ def figure_tones(path):
 
 
 def analyse_arrays(record, wall, displacements, **options):
-    """The analysis of every segment of `record`, from the cycle log's stamps `wall` and the end effector's displacement at each, (N, 6) in the
-    order of DOFS (trace.measured_displacements). `options` go to the sweep estimator."""
+    """The analysis of every segment of `record`, from the cycle log's stamps `wall` ((N,) monotonic s) and the end effector's displacement at each,
+    (N, 6) in the order of `trace.DOFS` (`x, y, z, rx, ry, rz` in m and rad).
+
+    `record.segments` is an iterable of segment objects with `.kind` (`"sweep"` or `"figure8"`), `.log` (`(stamp_s, path_time_s)` sequence),
+    `.period` (> 0, s), `.label`, and `.path()`. `options` go to `response.frequency_response`."""
     results = []
     for segment in record.segments:
         path = segment.path()
@@ -90,7 +93,10 @@ def analyse_arrays(record, wall, displacements, **options):
 
 def analyse_with_fk(record, cycles_path, columns, fk, origin_position, origin_matrix, **options):
     """The analysis of `record` from the cycle log at `cycles_path` using a generic `fk(q) -> (position, rotation_matrix)` callable and origin pose,
-    without requiring a gafro System or task space."""
+    without requiring a gafro System or task space.
+
+    `columns` must list the `q_<joint>` column names in the exact joint order expected by `fk(q)`; `origin_position` is (3,) in m and
+    `origin_matrix` is a (3, 3) world-frame rotation matrix."""
     trace = read_trace(cycles_path, ["wall_time"] + list(columns))
     displacements = measured_displacements_with(trace, columns, fk, origin_position, origin_matrix)
     return analyse_arrays(record, trace["wall_time"], displacements, **options)
@@ -124,8 +130,9 @@ def _low_frequency_delay(response):
 
 
 def report(results, out=None, plot=False, verbose=False, name="analysis", title=""):
-    """Prints what `analyse` found, and with `out` (a folder) writes it as CSV, and with `plot` the sweeps as Bode plots.
+    """Prints what `analyse` found, and with `out` (a folder path) writes it as CSV, and with `plot` the sweeps as Bode plots.
 
+    `results` is a sequence of `SegmentAnalysis` (where each `.segment` exposes `.complete` and `.label`).
     Sweeps: per degree of freedom the fit (gain, wn, zeta, delay), the delay the phase implies at low frequency, the -3 dB bandwidth, the mean quality and
     the largest off-axis gain. Figure eights: per tone the gain, phase, the delay the phase implies at that frequency, the quality and the largest
     off-axis gain. Off-axis gains are median |H| in SI units of output per unit of input (m/m, rad/rad, m/rad, rad/m)."""

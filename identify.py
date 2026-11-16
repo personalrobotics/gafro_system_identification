@@ -46,7 +46,7 @@ def _expand(value, what):
 
 @dataclass(frozen=True)
 class PoseGains:
-    """The pose stage's PD gains per degree of freedom: `omega` (rad/s) and `zeta`, six each, in the order of DOFS."""
+    """The pose stage's PD gains per degree of freedom: `omega` ((6,) rad/s, > 0) and `zeta` ((6,), > 0), in the order of `trace.DOFS`."""
 
     omega: np.ndarray
     zeta: np.ndarray
@@ -146,10 +146,12 @@ class ResponseSet:
 
 
 def closed_loop_response(A, tau, C, gains, frequency, feedforward="off", hold=0.0):
-    """The model's closed-loop response, reference to pose, at `frequency` (Hz): (n, 6, 6), `[k, output, input]`.
+    """The model's closed-loop response, reference to pose, at `frequency` (1-D Hz): (n, 6, 6), `[k, output, input]`.
 
+    `A` is (6, 6) in `trace.DOFS` order; `tau` is a scalar or (6,) delay per input channel (s, >= 0); `C` is (6,) viscous damping (1/s);
+    `gains` is `PoseGains`; `feedforward` is in `FEEDFORWARD` (`"off"`, `"twist"`, `"twist+rate"`).
     T = (s^2 I + C s + A e^{-s tau} (Omega^2 + 2 Zeta Omega s))^-1 A e^{-s tau} N, with N = Omega^2 for no feedforward, plus 2 Zeta Omega s for the
-    reference's twist and s^2 for its rate. `hold` (s): the reference reaches the controller as straight chunks of this length between samples of the
+    reference's twist and s^2 for its rate. `hold` (>= 0, s): the reference reaches the controller as straight chunks of this length between samples of the
     nominal path (one device period), a first-order hold of gain sinc^2(f hold) -- 3% down at 5 Hz for 20 ms, 18% at 12 Hz -- and no phase; the nominal
     path is what the lock-in estimate takes as the input, so the response it measures carries that gain."""
     s = 2j * np.pi * np.asarray(frequency, dtype=float)[:, None, None]
@@ -212,12 +214,13 @@ def _uncertainty(measured, quality, floor):
 
 
 def fit_plant(data, gains, diagonal=False, per_axis_delay=False, noise_floor=0.02, loss="soft_l1", delay_starts=(0.005, 0.02, 0.05)):
-    """Fits the plant to `data` (a ResponseSet) for the pose stage's commanded `gains`.
+    """Fits the plant to `data` (a `ResponseSet` with `feedforward` in `FEEDFORWARD`) for the pose stage's commanded `gains` (`PoseGains`).
 
     `diagonal`: no coupling between axes (A diagonal), to show what it is worth. `per_axis_delay`: a delay per axis, not one for all. Every point is
-    weighted by the inverse of its uncertainty (`_uncertainty`, at least `noise_floor` in units of the sweep's amplitude); `loss` is least_squares'
-    (robust to outliers by default). A column of A whose axis was not swept stays the identity's and its damping zero. The standard errors come from
-    the fit's Jacobian, scaled by the fit's own residual, and are optimistic where the errors are not white."""
+    weighted by the inverse of its uncertainty (`_uncertainty`, at least `noise_floor` > 0 in units of the sweep's amplitude); `loss` is
+    `scipy.optimize.least_squares`'s (robust to outliers by default); `delay_starts` are initial delay guesses in seconds (bounded to [0, 0.3] s).
+    A column of A whose axis was not swept stays the identity's and its damping zero. The standard errors come from the fit's Jacobian, scaled by the
+    fit's own residual, and are optimistic where the errors are not white."""
     ff = data.feedforward
     if ff not in FEEDFORWARD:
         raise ValueError(f"feedforward {ff!r}: expected one of {FEEDFORWARD}")

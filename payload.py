@@ -40,8 +40,11 @@ class Tool:
 
 @dataclass
 class ArmModel:
-    """The arm as the analysis needs it: `fk(q)` -> (position (3), rotation matrix (3x3)) of the end effector, `mass_matrix(q)` -> (n, n), both for the n joints
-    the controller moves (q has n entries)."""
+    """The arm as the analysis needs it: `fk(q)` -> (position (3,), rotation matrix (3, 3)) in the world frame (m, proper rotation),
+    `mass_matrix(q)` -> (n, n) symmetric positive-definite joint-space inertia (kg m^2 / kg), both for the n joints the controller moves.
+
+    `q` (n,) and `armature` (n,) (reflected rotor inertia in kg m^2, or None) must be ordered **base-to-tip** along the arm; `Posture.gain` and
+    `fit_tool_error` treat the last `min(3, n)` entries as the wrist joints and the preceding `n - min(3, n)` entries as the base joints."""
 
     fk: object
     mass_matrix: object
@@ -127,9 +130,11 @@ class Posture:
         return tool.mass * centre.T @ centre + self.jacobian[3:].T @ inertia @ self.jacobian[3:]
 
     def gain(self, tool, wrist_scale=1.0, base_scale=1.0, armature=None):
-        """A for an arm that carries `tool` and whose joints have other armature than the model's (the reflected rotor inertia the model states: the published
-        a published table for the arm). `base_scale` and `wrist_scale` multiply the model's armature of joints 1-3 (pan, lift, elbow) and 4-6 (the wrist);
-        `armature` instead gives the arm's own, one value per joint (kg m^2)."""
+        """A (6x6, in `trace.DOFS` order) for an arm carrying `tool` whose joints have a different armature than the model's.
+
+        `base_scale` and `wrist_scale` (> 0) multiply `self.arm.armature`, assuming `self.q` and `self.arm.armature` are ordered **base-to-tip**:
+        the last `min(3, n)` joints are scaled by `wrist_scale` and the preceding `n - min(3, n)` joints by `base_scale`. `armature` instead gives
+        the arm's own (n,) array (kg m^2, same joint order as `q`, requires `self.arm.armature` not None) and overrides the two scales."""
         mass = self.without_tool + self._tool_term(tool)
         if armature is not None:
             mass = mass + np.diag(np.asarray(armature, dtype=float) - self.arm.armature)
@@ -177,17 +182,19 @@ class ToolError:
 
 
 def fit_tool_error(arm, q, model_tool, A, A_se=None, scale=None, floor=0.02, fit_inertia=False, fit_armature=True, armature=None):
-    """The mass and centre-of-mass error of the tool, the scale of the wrist joints' inertia and, with `fit_inertia`, of the tool's, from an identified A
-    (identify.PlantFit.A, with its standard errors).
+    """The mass and centre-of-mass error of the tool, the scale of the wrist/base joints' armature and, with `fit_inertia`, of the tool's, from an
+    identified A (`identify.PlantFit.A`, (6, 6) in `trace.DOFS` order, with optional (6, 6) standard errors `A_se`).
 
-    The model's tool is `model_tool`; the arm's is the same with a different mass and centre of mass. `fit_armature` (when the arm's armature is known): one
-    factor on the armature of the wrist joints and one on that of pan, lift and elbow -- the armature is nearly all of a wrist
-    joint's inertia (the generic 0.1 kg m^2 a model without the published values has is well below a published armature), so they set how much acceleration the arm gets per acceleration commanded.
-    Their effect on A dwarfs the tool's: with the armature that far off, the tool's mass and centre of mass are not identifiable from A (the fit absorbs what the
-    armature's two factors leave in them). With `armature` (one value per joint, e.g. a published table) the arm's own is taken as known, not fitted, and the
-    tool's error is found on top of it. `fit_inertia`: the tool's own inertia about its centre scaled, off by default: next to the wrist's armature it moves
-    A by under 1%. A and its prediction are compared in units of each axis's sweep amplitude (`scale`: six numbers, default linear 1 and angular 4, the sweeps' usual ratio), so that
-    m/rad and rad/m terms weigh alike, each over its standard error but at least `floor`."""
+    `arm` is an `ArmModel` and `q` is the (n,) joint posture (rad) ordered **base-to-tip** (when `fit_armature` is True and `armature` is None, the
+    last `min(3, n)` joints are treated as the wrist and the preceding `n - min(3, n)` as the base). The model's tool is `model_tool`; the arm's is
+    the same with a different mass and centre of mass. `fit_armature` (when `arm.armature` is known): one factor on the armature of the wrist joints
+    and one on that of the base joints -- the armature is nearly all of a wrist joint's inertia (the generic 0.1 kg m^2 a model without the published
+    values has is well below a published armature), so they set how much acceleration the arm gets per acceleration commanded. Their effect on A dwarfs
+    the tool's: with the armature that far off, the tool's mass and centre of mass are not identifiable from A (the fit absorbs what the armature's two
+    factors leave in them). With `armature` ((n,) kg m^2 in the same joint order as `q`, e.g. a published table) the arm's own is taken as known, not
+    fitted, and the tool's error is found on top of it. `fit_inertia`: the tool's own inertia about its centre scaled, off by default: next to the
+    wrist's armature it moves A by under 1%. `scale` is (6,) positive sweep amplitudes in SI units `(m, m, m, rad, rad, rad)` (default linear 1,
+    angular 4), so m/rad and rad/m terms weigh alike, each over its standard error floored at `floor` (> 0)."""
     A = np.asarray(A, dtype=float)
     scale = np.array([1.0] * 3 + [4.0] * 3) if scale is None else np.asarray(scale, dtype=float)
     ratio = scale[None, :] / scale[:, None]
@@ -293,8 +300,9 @@ def distal_tool(model_path, wrist_link, end_effector_link):
 
 
 def joint_armature(model_path, arm, joint_names):
-    """The armature (kg m^2, `dynamics: armature`) the model YAML gives each of `joint_names` (full names, e.g. 'right_ur5e/wrist_1_joint'): the reflected rotor
-    inertia that is part of every joint's mass-matrix diagonal. 0 for a joint that states none."""
+    """The armature (kg m^2, `dynamics: armature`) the model YAML at `model_path` gives each of `joint_names` (full names, e.g.
+    'right_ur5e/wrist_1_joint', ordered base-to-tip to match `ArmModel.q`): the reflected rotor inertia that is part of every joint's mass-matrix
+    diagonal. 0 for a joint that states none. (`arm` is unused, kept for caller compatibility.)"""
     import yaml
 
     joints = yaml.safe_load(open(model_path))["system"]["joints"]

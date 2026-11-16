@@ -150,14 +150,14 @@ def _phasor(t, x, phase, weights):
 
 def frequency_response(t, u, y, sweep, t0=0.0, frequencies=None, points=24, cycles=4.0, octave_span=0.5, minimum_samples=20,
                        sweep_time=None):
-    """The response of `y` to `u` at a grid of frequencies, from samples taken together at times `t` (seconds, any clock).
+    """The response of `y` to `u` at a grid of frequencies, from samples taken together at times `t` (1-D monotonic seconds, any clock).
 
-    `u` is the excitation as the system received it and `y` its output, both at the stamps `t`; `sweep` is the chirp that
-    drove `u`, whose time is `t - t0`. `frequencies` (Hz): where to estimate, default `points` geometrically spaced
-    points a quarter-octave in from the sweep's ends. Each window is `cycles` cycles wide at its frequency but at most
-    `octave_span` octaves of the sweep, and holds at least `minimum_samples` samples or the point is dropped. The samples
-    need not be evenly spaced. `sweep_time`: the sweep's own time at each sample, when it is known better than
-    `t - t0` (a reference that ran late: see PathFollower.log); the windows and the chirp's phase then follow it."""
+    `u` (excitation as received) and `y` (output) are 1-D arrays with the same shape as `t`; `sweep` is a `Sweep` instance (`0 < f_start < f_end`,
+    positive `duration` and `ramp`), whose time is `t - t0` when `sweep_time` is None. `frequencies` (Hz, > 0): where to estimate, default `points`
+    geometrically spaced points a quarter-octave in from the sweep's ends. Each window is `cycles` (> 0) cycles wide at its frequency but at most
+    `octave_span` (> 0) octaves of the sweep, and holds at least `minimum_samples` (>= 4 for the 4-parameter `_phasor` fit) or the point is dropped.
+    The samples need not be evenly spaced. `sweep_time`: 1-D array with the shape of `t` giving the sweep's own time at each sample when known better
+    than `t - t0` (e.g. a reference that ran late: see PathFollower.log); the windows and the chirp's phase then follow it."""
     t, u, y = (np.asarray(a, dtype=float) for a in (t, u, y))
     if not t.shape == u.shape == y.shape:
         raise ValueError("t, u and y must have the same length")
@@ -206,9 +206,10 @@ def _tone_fit(s, x, frequencies):
 
 
 def tone_response(s, u, y, frequency, others=()):
-    """The response of `y` to `u` at one known frequency (Hz), from samples at times `s` (seconds): the ratio of their complex amplitudes at that
-    frequency in a joint least-squares fit of it and of the `others` (the other tones the signals hold: the figure eight's three) with a constant
-    and a drift. Returns (response, quality), the quality as in FrequencyResponse. For a reference made of tones over a whole number of their cycles."""
+    """The response of `y` to `u` at one known `frequency` (> 0, Hz), from equal-length 1-D samples at times `s` (s): the ratio of their complex
+    amplitudes at that frequency in a joint least-squares fit of it and of `others` (iterable of distinct non-zero Hz frequencies present in the signals,
+    e.g. the figure eight's other tones) with a constant and a drift. Returns (response, quality), the quality in [0, 1] as in FrequencyResponse.
+    For a reference made of tones over a whole number of their cycles."""
     frequencies = [frequency, *others]
     c_in, _ = _tone_fit(s, u, frequencies)
     c_out, quality = _tone_fit(s, y, frequencies)
@@ -267,9 +268,9 @@ class SecondOrderFit:
 
 
 def fit_second_order(response, minimum_quality=0.5, delay=True):
-    """Fits a second-order system with a delay to a measured `response`, weighting each frequency by its quality and leaving
-    out those under `minimum_quality`. The error is the log of the ratio of model to measurement, so gain and phase count
-    alike. `delay=False` fixes it at zero."""
+    """Fits a second-order system with a delay to a measured `response` (`FrequencyResponse` with >= 5 points having `quality >= minimum_quality` in
+    [0, 1]), weighting each frequency by `sqrt(quality)` and leaving out those under `minimum_quality`. The error is the log of the ratio of model
+    to measurement, so gain and phase count alike. `delay=False` fixes it at zero."""
     use = response.quality >= minimum_quality
     if use.sum() < 5:
         raise ValueError(f"only {int(use.sum())} frequencies with quality >= {minimum_quality}: too few to fit")

@@ -102,8 +102,8 @@ def read_ticks(path):
 
 
 def band_levels(signal, rate, window=0.5, hop=0.25, bands=BANDS):
-    """The signal's (n, k) velocity in windows: the centre times (m), the rms in each band, (m, bands, k), and in each band the dominant frequency over all
-    k, (m, bands).
+    """The `(n, k)` `signal` (e.g. joint velocities) in windows of `window` (> 0, s) every `hop` (> 0, s) at sample `rate` (> 0, Hz): returns
+    centre times `(m,)`, rms in each band `(m, bands, k)`, and in each band `(low_hz, high_hz)` of `bands` the dominant frequency over all `k`, `(m, bands)`.
 
     Each window is Hann-weighted and its one-sided power summed over the band, scaled so that a sinusoid of amplitude a reads a / sqrt(2) and a signal that
     flips sign every sample (all of its power at the Nyquist frequency, a bin counted once) reads its amplitude. A band reaching the Nyquist frequency
@@ -132,8 +132,9 @@ def band_levels(signal, rate, window=0.5, hop=0.25, bands=BANDS):
 
 
 def find_onset(times, level, baseline=3.0, factor=4.0, floor=0.005, persist=3):
-    """The first time `level` (one number per window) rises above `factor` times its median over the first `baseline` seconds -- and above `floor` -- and
-    stays there for `persist` windows; None if it does not. Returns (time, threshold)."""
+    """The first time in `times` ((m,) monotonic s) where `level` ((m,) non-negative) rises above `factor` (> 0) times its median over the first
+    `baseline` (> 0, s) seconds -- and above `floor` (>= 0) -- and stays there for `persist` (>= 1) consecutive windows; None if it does not.
+    Returns (time, threshold)."""
     quiet = times <= times[0] + baseline
     threshold = max(factor * float(np.median(level[quiet])), floor)
     above = level > threshold
@@ -144,9 +145,9 @@ def find_onset(times, level, baseline=3.0, factor=4.0, floor=0.005, persist=3):
 
 
 def lag_one(x, smooth=11):
-    """The lag-1 autocorrelation of `x` (one joint's samples) after its slow part is taken out (a centred moving average of `smooth` samples): +1 for a slow
-    signal, 0 for white noise, -1 for one that alternates sign every sample -- a period-2 oscillation at the Nyquist frequency, the buzz a discrete-time
-    loop falls into when its velocity feedback and its delay do not agree."""
+    """The lag-1 autocorrelation of `x` (1-D array, length > `2 * smooth`) after its slow part is taken out (a centred moving average of `smooth` >= 1
+    samples): +1 for a slow signal, 0 for white noise, -1 for one that alternates sign every sample -- a period-2 oscillation at the Nyquist frequency,
+    the buzz a discrete-time loop falls into when its velocity feedback and its delay do not agree."""
     x = np.asarray(x, dtype=float)
     fast = x - np.convolve(x, np.ones(smooth) / smooth, mode="same")
     fast = fast[smooth:-smooth]
@@ -218,10 +219,11 @@ def _alternation(signal, wall, joints, baseline, tail, rate):
 
 
 def analyse(cycles, ticks=None, window=0.5, baseline=3.0, factor=4.0, floor=0.005, tail=2.0, bands=BANDS, command_floor=0.02):
-    """The report on a run: the vibration per band of the joints' velocity and, when it was logged, of the controller's command (when it began, at which
-    frequency, on which joints, whether it goes on after the device is idle for the last `tail` s); whether the last seconds alternate sign every cycle (a
-    period-2 buzz); the noise at rest; and the timing of the control loop and the ticks, split by the device's state when there is a tick log. Bands above
-    the log's Nyquist frequency are left out."""
+    """The report on a run from `cycles` (`Cycles`) and optional `ticks` (`Ticks` on the same `CLOCK_MONOTONIC` clock): the vibration per band of
+    the joints' velocity and, when logged, of the controller's command (when it began, at which frequency, on which joints, whether it goes on after
+    the device is idle for the last `tail` > 0 s); whether the last seconds alternate sign every cycle (a period-2 buzz); the noise at rest (first
+    `baseline` > 0 s); and the timing of the control loop and the ticks, split by the device's state when there is a tick log. `window` > 0 (s);
+    `factor` > 0; `floor`, `command_floor` >= 0. Bands above the log's Nyquist frequency are left out."""
     wall = cycles.wall
     report = VibrationReport(float(wall[-1] - wall[0]), cycles.rate)
     bands = {name: edges for name, edges in bands.items() if edges[0] < cycles.rate / 2}

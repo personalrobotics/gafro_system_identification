@@ -97,10 +97,12 @@ def reach(plan):
 
 
 def schedule(joints, speeds, centre, travel_limit, min_duration, ramp=RAMP):
-    """(plans, skipped): for each of `joints`, one at a time, at each speed ascending a forward pass and the back pass over the same stretch.
+    """(plans, skipped): for each 0-based joint index in `joints`, one at a time, at each positive speed in `speeds` (rad/s) ascending, a forward
+    pass and the back pass over the same stretch.
 
-    `centre[joint]` is the middle of the stretch (rad); a pass covers `speed * (min_duration + ramp)` rad, at most `travel_limit`; the speeds
-    that would cover more are in `skipped`. A joint's passes finish where they began, so the arm is not walked away from where it was put."""
+    `centre` is a sequence indexed by joint (rad) giving the middle of the stretch; a pass covers `speed * (min_duration + ramp)` rad, at most
+    `travel_limit` (> 0, rad), with `min_duration` >= 0 (s) and `ramp` > 0 (s); speeds that would cover more are in `skipped`. A joint's passes finish
+    where they began, so the arm is not walked away from where it was put."""
     kept, skipped = plan_stretches(sorted(speeds), travel_limit, min_duration, ramp)
     plans = []
     for joint in joints:
@@ -112,7 +114,8 @@ def schedule(joints, speeds, centre, travel_limit, min_duration, ramp=RAMP):
 
 
 def check_limits(plans, limits, margin=0.0):
-    """Raise ValueError naming every pass that leaves `limits[joint]` = (lower, upper) shrunk by `margin`; nothing otherwise."""
+    """Raise ValueError naming every pass in `plans` that leaves `limits[plan.joint]` = (lower, upper) (rad) shrunk by `margin` (>= 0, rad);
+    nothing otherwise."""
     bad = []
     for plan in plans:
         lower, upper = limits[plan.joint]
@@ -126,10 +129,10 @@ def check_limits(plans, limits, margin=0.0):
 def pass_path(plan, hold, period=0.01):
     """The pass as a joint path a robot plays: (times, positions, velocities, window).
 
-    `hold` is the arm's joint vector (rad) the other joints stay at; the driven joint follows `stretch_profile` from `plan.start`.
-    `positions` and `velocities` have one row per time and one column per entry of `hold`: the shape `RobotNode.follow_path` takes.
-    `window` is (begin, end) of the steady-speed part in the path's own time (s from its first row). The path's first row is where the arm
-    must be, so a caller moves there first by whatever it uses to go places."""
+    `hold` is the 1-D joint vector (rad, length > `plan.joint`) the other joints stay at; the driven joint follows `stretch_profile` from
+    `plan.start` sampled every `period` (> 0, s). `positions` and `velocities` have one row per time and one column per entry of `hold`: the shape
+    `RobotNode.follow_path` takes. `window` is (begin, end) of the steady-speed part in the path's own time (s from its first row). The path's
+    first row is where the arm must be, so a caller moves there first by whatever it uses to go places."""
     hold = np.asarray(hold, dtype=float)
     position, velocity, total = stretch_profile(plan.speed, plan.constant, plan.ramp)
     times = np.arange(0.0, total + 0.5 * period, period)
@@ -146,11 +149,12 @@ def as_pass(plan, window, origin):
 
 
 def steady_window(times, velocity, plan, tolerance=0.1, minimum=0.5):
-    """(begin, end) of the longest stretch of `times` where the measured `velocity` held `plan`'s speed in its direction, or None.
+    """(begin, end) of the longest stretch of `times` (1-D s) where the measured `velocity` (1-D rad/s, same length) held `plan`'s speed in its
+    direction, or None.
 
-    "Held" is within `tolerance` of the speed, and the stretch must last `minimum` of `plan.constant`. The window is read from what the joint
-    did, not from a clock offset between the path and the recording, so a pass whose joint never held its speed (stiction at the slowest, a
-    stop that fired) has no window and the caller says so instead of fitting a ramp."""
+    "Held" is within relative `tolerance` (> 0) of `plan.speed`, and the stretch must last at least `minimum` (in (0, 1]) of `plan.constant`. The
+    window is read from what the joint did, not from a clock offset between the path and the recording, so a pass whose joint never held its speed
+    (stiction at the slowest, a stop that fired) has no window and the caller says so instead of fitting a ramp."""
     times, velocity = np.asarray(times, dtype=float), np.asarray(velocity, dtype=float)
     holding = np.abs(velocity - plan.direction * plan.speed) <= tolerance * plan.speed
     best, start = None, None
@@ -167,9 +171,11 @@ def steady_window(times, velocity, plan, tolerance=0.1, minimum=0.5):
 
 
 def torque_reader(names, cycles, joint_names, torque="tau_{}", velocity="qd_{}", stamp="wall_time", middle=0.5):
-    """The `read(stretch)` of `friction_table_with` for a log with a measured torque column and a velocity column per joint.
+    """The `read(stretch)` of `friction_table_with` for a log (`names` column headers, `cycles` (N, cols) array) with a measured torque column and a
+    velocity column per joint.
 
-    `torque` and `velocity` are column templates, formatted with the joint's name. The window is the middle `middle` share of the pass."""
+    `joint_names` is a sequence indexed by `stretch.joint`; `torque` and `velocity` are column templates formatted with `joint_names[stretch.joint]`,
+    and `stamp` is the time column name (s). The window is the middle `middle` (in (0, 1]) share of the pass."""
     clock = cycles[:, names.index(stamp)]
 
     def read(stretch):
