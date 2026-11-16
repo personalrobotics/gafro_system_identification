@@ -150,7 +150,9 @@ def go_to(robot, *args, seconds=None, speed=0.3, minimum=2.0):
     """Move to the joint vector `target` ((N,) rad) along a straight line at about `speed` (> 0, rad/s) (at least `minimum` > 0 s, or exact
     `seconds` > 0), forwarding `play` (dict or None) kwargs to `follow_path`.
 
-    Accepts `go_to(adapter, target, play=None, ...)` or legacy `go_to(node, arm, target, play, ...)`."""
+    Call forms (`target` and `play` are positional-only via `*args` and cannot be passed by keyword):
+      - `go_to(robot, target[, play], seconds=..., speed=..., minimum=...)` where `robot` is a `RobotAdapter`
+      - legacy `go_to(robot, arm, target[, play], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
         target = args[0]
@@ -170,7 +172,11 @@ def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
 
     `hold` is the (N,) joint vector (rad) for un-driven joints (None samples current position); `play` is a dict or None of `follow_path` kwargs;
     `minimum_move` (> 0, s) is the minimum duration for moving to the start pose. `why` is None when there is a window and otherwise says what
-    happened. Accepts `play_pass(adapter, plan, play=None, hold=None, ...)` or legacy `play_pass(node, arm, plan, play, hold, ...)`."""
+    happened.
+
+    Call forms (`arm`, `plan`, `play`, and `hold` are positional-only via `*args` and cannot be passed by keyword):
+      - `play_pass(robot, plan[, play[, hold]], period=..., tolerance=..., minimum_move=...)` where `robot` is a `RobotAdapter`
+      - legacy `play_pass(robot, arm, plan[, play[, hold]], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
         plan = args[0]
@@ -208,7 +214,11 @@ def run(robot, *args, hold=None, period=0.002, on_pass=None, minimum_move=2.0):
     The other joints stay where they were when the run began (`hold` (N,) rad, or the measured pose if None). `play` is a dict or None of
     `follow_path` kwargs; `period` (> 0, s) is the sampler interval; `on_pass(plan, stretch_or_none, why_or_none)` is an optional callback after
     each pass. A move the adapter refuses or stops is not retried: it is dropped with its reason, and the arm has held where it is, so the next
-    pass starts from there. Accepts `run(adapter, plans, play=None, ...)` or legacy `run(node, arm, plans, play, ...)`."""
+    pass starts from there.
+
+    Call forms (`arm`, `plans`, and `play` are positional-only via `*args` and cannot be passed by keyword):
+      - `run(robot, plans[, play], hold=..., period=..., on_pass=..., minimum_move=...)` where `robot` is a `RobotAdapter`
+      - legacy `run(robot, arm, plans[, play], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
         plans = args[0]
