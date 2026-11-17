@@ -42,11 +42,12 @@ def unpack(theta, n_joints=None):
 
 
 def clip_scales(theta, lo=0.0, hi=1.0):
+    """Elementwise clip `theta` (array-like of friction scales) to `[lo, hi]` (default `[0.0, 1.0]`)."""
     return np.clip(np.asarray(theta, dtype=float), lo, hi)
 
 
 def clip_around(theta, center, radius=0.25):
-    """Keep each scale within ±radius of `center`, still inside [0, 1]."""
+    """Keep each scale in `theta` within `±radius` (>= 0) of `center` (same shape), clamped to `[0, 1]`."""
     center = np.asarray(center, dtype=float)
     lo = np.maximum(0.0, center - radius)
     hi = np.minimum(1.0, center + radius)
@@ -54,12 +55,13 @@ def clip_around(theta, center, radius=0.25):
 
 
 def to_logit(theta, eps=1e-4):
-    """Map [0,1] scales to R for unconstrained SPSA; clamps away from the ends."""
+    """Map `[0, 1]` scales `theta` to unconstrained `R` for SPSA, clamping away from `{0, 1}` by `eps` (`0 < eps < 0.5`)."""
     u = np.clip(np.asarray(theta, dtype=float), eps, 1.0 - eps)
     return np.log(u / (1.0 - u))
 
 
 def from_logit(z):
+    """Inverse of `to_logit`: sigmoid mapping unconstrained logit array `z` back to `(0, 1)`."""
     z = np.asarray(z, dtype=float)
     return 1.0 / (1.0 + np.exp(-z))
 
@@ -176,13 +178,27 @@ def path_cost(summary, y_to_rx=0.0,
     )
 
 
-def spsa_step(z, cost_plus, cost_minus, k, a=0.15, c=0.08, A=5.0, alpha=0.602, gamma=0.101, seed=None):
-    """One SPSA update in logit space on 1-D vector `z` at iteration `k` (>= 0). `cost_plus` and `cost_minus` are scalar losses `L(z + c_k Δ)` and
-    `L(z - c_k Δ)`; `a, c, A, alpha, gamma` > 0 are the standard SPSA gain-schedule hyperparameters."""
+def spsa_perturb(z, k, c=0.08, gamma=0.101, seed=None):
+    """Draw Rademacher perturbation `delta` in {-1, +1}^d at iteration `k` (>= 0) and return `(z_plus, z_minus, ck, delta)` in logit space."""
+    z = np.asarray(z, dtype=float)
     rng = np.random.default_rng(seed)
     ck = c / ((k + 1) ** gamma)
-    ak = a / ((k + 1 + A) ** alpha)
     delta = rng.choice([-1.0, 1.0], size=z.shape)
+    return z + ck * delta, z - ck * delta, ck, delta
+
+
+def spsa_step(z, cost_plus, cost_minus, k, a=0.15, c=0.08, A=5.0, alpha=0.602, gamma=0.101, seed=None, delta=None):
+    """One SPSA update in logit space on 1-D vector `z` at iteration `k` (>= 0). `cost_plus` and `cost_minus` are scalar losses `L(z + c_k Δ)` and
+    `L(z - c_k Δ)`; pass the `delta` array from `spsa_perturb` (or the same `seed` used when perturbing). `a, c, A, alpha, gamma` > 0 are the
+    standard SPSA gain-schedule hyperparameters."""
+    z = np.asarray(z, dtype=float)
+    ck = c / ((k + 1) ** gamma)
+    ak = a / ((k + 1 + A) ** alpha)
+    if delta is None:
+        rng = np.random.default_rng(seed)
+        delta = rng.choice([-1.0, 1.0], size=z.shape)
+    else:
+        delta = np.asarray(delta, dtype=float)
     grad = (cost_plus - cost_minus) / (2.0 * ck * delta)
     return z - ak * grad, ck, ak, delta
 

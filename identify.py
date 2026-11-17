@@ -96,13 +96,18 @@ class ResponseSet:
 
     @classmethod
     def from_analysis(cls, results, feedforward="off"):
-        """From `analysis.analyse` results: every complete-enough sweep segment is one excitation (figure eights are not used)."""
+        """From `analysis.analyse` results (`SegmentAnalysis` sequence): every sweep segment with a measured response is one `Excitation` (figure
+        eights are ignored). Reads the sweep amplitude from `segment.parameters["sweep"]["amplitude"]` or `segment.path().sweep.amplitude`."""
         excitations, period = [], 0.0
         for result in results:
             if result.segment.kind != "sweep":
                 continue
             period = float(result.segment.period)
-            amplitude = float(result.segment.parameters["sweep"]["amplitude"])
+            params = getattr(result.segment, "parameters", None)
+            if isinstance(params, dict) and "sweep" in params and "amplitude" in params["sweep"]:
+                amplitude = float(params["sweep"]["amplitude"])
+            else:
+                amplitude = float(result.segment.path().sweep.amplitude)
             for dof, responses in result.inputs.items():
                 own = responses[dof]
                 if not own.frequency.size:
@@ -341,6 +346,7 @@ class Stability:
 
 
 def stability(plant, gains):
+    """Evaluate `Stability` of `plant` (`PlantFit`) at `gains` (`PoseGains`), filtering out stable Padé-approximation artifact poles above `2.5 / max(tau)`."""
     poles = closed_loop_poles(plant.A, plant.tau, plant.C, gains)
     # The Pade approximation of the delay brings fast poles of its own, around 6 / tau and well damped (about 0.5): not the loop's, and the least damped of a
     # well damped loop. The loop's own oscillation is at about pi / (2 tau) at most (1 / (4 tau) Hz): keep what is below 2.5 / tau.

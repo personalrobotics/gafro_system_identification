@@ -60,6 +60,10 @@ def analyse_arrays(record, wall, displacements, **options):
 
     `record.segments` is an iterable of segment objects with `.kind` (`"sweep"` or `"figure8"`), `.log` (`(stamp_s, path_time_s)` sequence),
     `.period` (> 0, s), `.label`, and `.path()`. `options` go to `response.frequency_response`."""
+    wall = np.asarray(wall, dtype=float)
+    displacements = np.asarray(displacements, dtype=float)
+    if displacements.shape != (len(wall), len(DOFS)):
+        raise ValueError(f"displacements must have shape ({len(wall)}, {len(DOFS)}) matching wall and DOFS, got {displacements.shape}")
     results = []
     for segment in record.segments:
         path = segment.path()
@@ -71,7 +75,7 @@ def analyse_arrays(record, wall, displacements, **options):
             u = path.sweep.value(tau[inside])
             inputs = {path.dof: {out: frequency_response(wall[inside], u, displacements[inside, j], path.sweep, sweep_time=tau[inside], **options)
                                  for j, out in enumerate(DOFS)}}
-        else:
+        elif segment.kind == "figure8":
             # the whole figures that were traced (a run stopped early has fewer than it set out to): each tone holds whole cycles of them
             whole = min(path.loops, int(np.floor((np.max(tau[inside]) - path.ramp) / path.period + 1e-9)))
             if whole < 1:
@@ -87,6 +91,8 @@ def analyse_arrays(record, wall, displacements, **options):
                 for j, out in enumerate(DOFS):
                     h, quality = tone_response(tau[steady], u, displacements[steady, j], frequency, others)
                     inputs[dof][out] = FrequencyResponse(np.array([frequency]), np.array([h], dtype=complex), np.array([quality]))
+        else:
+            raise ValueError(f"{segment.label}: unknown segment kind {segment.kind!r}; expected 'sweep' or 'figure8'")
         results.append(SegmentAnalysis(segment, inputs, int(inside.sum())))
     return results
 
@@ -126,6 +132,8 @@ def analyse_files(record, cycles_path, model=None, **options):
 
 
 def _low_frequency_delay(response):
+    if response.frequency.size == 0:
+        return float("nan")
     return float(np.median(response.delay()[:3])) * 1e3
 
 

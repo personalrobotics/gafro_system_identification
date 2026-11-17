@@ -60,10 +60,10 @@ class Ticks:
 
 
 def read_cycles(path, velocity_prefix):
-    """The cycle log at `path`, for the joints of one arm: the joints whose velocity columns start with `velocity_prefix` (e.g. `qd_right_ur5e/`: the
-    column name template of the robot's cycle log, `qd_<arm's group>/<joint>`)."""
-    with open(path) as handle:
-        header = handle.readline().strip().split(",")
+    """The cycle log CSV at `path`, for the joints of one arm: the joints whose velocity columns start with `velocity_prefix` (e.g.
+    `qd_right_ur5e/` or `qd_openarm_left_`: the column name prefix `qd_<group>` in the cycle log)."""
+    with open(path, encoding="utf-8") as handle:
+        header = [h.strip() for h in handle.readline().strip().split(",")]
     joints = [name[3:] for name in header if name.startswith(velocity_prefix)]
     if not joints:
         raise ValueError(f"{path}: no {velocity_prefix}... columns: was it recorded with trace=True, and for that arm?")
@@ -95,6 +95,12 @@ class TickLog:
     def close(self):
         self._file.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def read_ticks(path):
     data = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
@@ -109,6 +115,8 @@ def band_levels(signal, rate, window=0.5, hop=0.25, bands=BANDS):
     flips sign every sample (all of its power at the Nyquist frequency, a bin counted once) reads its amplitude. A band reaching the Nyquist frequency
     includes it."""
     size, step = int(round(window * rate)), int(round(hop * rate))
+    if len(signal) < size:
+        raise ValueError(f"signal of {len(signal)} samples at {rate:.1f} Hz is shorter than the {window} s analysis window")
     weights = np.hanning(size)
     one_sided = np.full(size // 2 + 1, 2.0)  # an interior bin stands for its mirror image too; the Nyquist bin (even sizes) and DC do not
     one_sided[0] = 1.0
@@ -149,6 +157,8 @@ def lag_one(x, smooth=11):
     samples): +1 for a slow signal, 0 for white noise, -1 for one that alternates sign every sample -- a period-2 oscillation at the Nyquist frequency,
     the buzz a discrete-time loop falls into when its velocity feedback and its delay do not agree."""
     x = np.asarray(x, dtype=float)
+    if len(x) <= 2 * smooth + 1:
+        return float("nan")
     fast = x - np.convolve(x, np.ones(smooth) / smooth, mode="same")
     fast = fast[smooth:-smooth]
     return float(np.sum(fast[:-1] * fast[1:]) / max(np.sum(fast**2), 1e-300))
@@ -249,7 +259,7 @@ def analyse(cycles, ticks=None, window=0.5, baseline=3.0, factor=4.0, floor=0.00
             report.alternation["command"] = _alternation(command, wall, names, baseline, tail, cycles.rate)
             for k, name in enumerate(names):
                 ripple = command[quiet, k] - np.convolve(command[quiet, k], np.ones(11) / 11, mode="same")
-                report.rest[name]["command_std"] = float(np.std(ripple[11:-11]))
+                report.rest[name]["command_std"] = float(np.std(ripple[11:-11])) if len(ripple) > 22 else float("nan")
 
     def timing(selected):
         return {"period": percentiles(cycles.period[selected]), "compute": percentiles(cycles.compute[selected])}

@@ -75,8 +75,8 @@ class ArmModel:
 
 
 def task_jacobian(fk, q, step=STEP):
-    """(6, n): how the end effector's pose moves with the joints, in the coordinates of the sweeps -- the world-frame displacement of its origin and the
-    rotation vector of the world-frame rotation -- by central differences of `fk`."""
+    """(6, n): how the end effector's pose moves with the n joints `q` (rad), in the coordinates of the sweeps (`trace.DOFS`: world-frame
+    displacement of its origin in m and world-frame rotation vector in rad), by central differences of `fk(q)` with finite-difference `step` (> 0, rad)."""
     q = np.asarray(q, dtype=float)
     columns = []
     for k in range(len(q)):
@@ -89,7 +89,7 @@ def task_jacobian(fk, q, step=STEP):
 
 
 def _centre_jacobian(fk, q, offset, step=STEP):
-    """(3, n): the translation Jacobian of the point `offset` (in the end effector's frame)."""
+    """(3, n): the world-frame translation Jacobian of the point `offset` ((3,) m, in the end effector's frame) at joint vector `q` ((n,) rad)."""
     q = np.asarray(q, dtype=float)
     columns = []
     for k in range(len(q)):
@@ -102,7 +102,8 @@ def _centre_jacobian(fk, q, offset, step=STEP):
 
 
 def tool_mass_matrix(arm, q, tool):
-    """The tool's own term of the arm's mass matrix at `q`: m J_c^T J_c + J_w^T (R I R^T) J_w."""
+    """The `tool`'s (`Tool`) own (n, n) contribution to `arm`'s (`ArmModel`) joint-space mass matrix at posture `q` ((n,) rad):
+    m J_c^T J_c + J_w^T (R I R^T) J_w."""
     posture = Posture.__new__(Posture)
     posture.arm, posture.q = arm, np.asarray(q, dtype=float)
     posture.jacobian, posture.rotation = task_jacobian(arm.fk, posture.q), arm.fk(posture.q)[1]
@@ -110,8 +111,9 @@ def tool_mass_matrix(arm, q, tool):
 
 
 class Posture:
-    """What `loop_gain` needs of the arm at one joint posture, computed once: the task Jacobian, the mass matrix of the arm *without* its tool (the model's
-    with the model's tool taken out) and the inverse of the model's admittance J M^-1 J^T. `gain(tool)` is then A for an arm that carries `tool`."""
+    """What `loop_gain` needs of `arm` (`ArmModel`) at one non-singular joint posture `q` ((n,) rad, base-to-tip), computed once: the (6, n) task
+    Jacobian, the (n, n) mass matrix of the arm *without* its tool (`model_tool` subtracted) and the (6, 6) inverse of the model's task-space
+    admittance J M^-1 J^T. `gain(tool)` is then A for an arm that carries `tool`."""
 
     def __init__(self, arm, q, model_tool):
         self.arm, self.q = arm, np.asarray(q, dtype=float)
@@ -119,7 +121,10 @@ class Posture:
         self.rotation = arm.fk(self.q)[1]
         model = arm.mass_matrix(self.q)
         self.without_tool = model - self._tool_term(model_tool)
-        self.model_inverse = np.linalg.inv(self._admittance(model))
+        admittance = self._admittance(model)
+        if np.linalg.cond(admittance) > 1e10:
+            raise ValueError("posture q is singular or near-singular (task-space admittance condition number > 1e10); choose a non-singular posture")
+        self.model_inverse = np.linalg.inv(admittance)
 
     def _admittance(self, mass):
         return self.jacobian @ np.linalg.solve(mass, self.jacobian.T)
@@ -134,10 +139,11 @@ class Posture:
 
         `base_scale` and `wrist_scale` (> 0) multiply `self.arm.armature`, assuming `self.q` and `self.arm.armature` are ordered **base-to-tip**:
         the last `min(3, n)` joints are scaled by `wrist_scale` and the preceding `n - min(3, n)` joints by `base_scale`. `armature` instead gives
-        the arm's own (n,) array (kg m^2, same joint order as `q`, requires `self.arm.armature` not None) and overrides the two scales."""
+        the arm's own (n,) array (kg m^2, same joint order as `q`; treats `self.arm.armature is None` as zero) and overrides the two scales."""
         mass = self.without_tool + self._tool_term(tool)
         if armature is not None:
-            mass = mass + np.diag(np.asarray(armature, dtype=float) - self.arm.armature)
+            model_armature = 0.0 if self.arm.armature is None else np.asarray(self.arm.armature, dtype=float)
+            mass = mass + np.diag(np.asarray(armature, dtype=float) - model_armature)
         elif (wrist_scale != 1.0 or base_scale != 1.0) and self.arm.armature is not None:
             n = len(self.q)
             n_wrist = min(3, n)
@@ -147,16 +153,17 @@ class Posture:
 
 
 def loop_gain(arm, q, model_tool, real_tool):
-    """A (6x6, in the order of DOFS): the pose's acceleration per commanded acceleration when the controller's model has `model_tool` and the arm carries
-    `real_tool`, at the joint posture `q`. Rows are the pose's axes (outputs), columns the command's."""
+    """A (6x6, in the order of `trace.DOFS`): the pose's acceleration per commanded acceleration when the controller's model (`arm`: `ArmModel`) has
+    `model_tool` (`Tool`) and the arm carries `real_tool` (`Tool`), at the non-singular joint posture `q` ((n,) rad, base-to-tip). Rows are the
+    pose's axes (outputs), columns the command's."""
     return Posture(arm, q, model_tool).gain(real_tool)
 
 
 @dataclass
 class ToolError:
-    """What `fit_tool_error` found: the tool's mass is `mass_error` kg more than the model's and its centre of mass `com_error` (m, end effector frame) further,
-    each with its standard error; `predicted` is the A that tool gives, `explained` the share of A's departure from the identity it accounts for (1: all of
-    it, 0: none), `residual` the error of the prediction in units of A's standard errors."""
+    """What `fit_tool_error` found: the tool's mass is `mass_error` kg more than the model's and its centre of mass `com_error` ((3,) m, end effector
+    frame) further, each with its standard error; `predicted` is the (6, 6) A that tool gives, `explained` the share of A's departure from the
+    identity it accounts for (1: all of it, 0: none), `residual` the RMS error of the prediction in units of A's standard errors."""
 
     mass_error: float
     com_error: np.ndarray
@@ -177,7 +184,7 @@ class ToolError:
         c, s = self.com_error * 1e3, self.com_se * 1e3
         return (f"tool {self.mass_error * 1e3:+.0f} +- {self.mass_se * 1e3:.0f} g, CoM moved by ({c[0]:+.1f} +- {s[0]:.1f}, {c[1]:+.1f} +- {s[1]:.1f}, "
                 f"{c[2]:+.1f} +- {s[2]:.1f}) mm, tool inertia x{self.inertia_scale:.2f} +- {self.inertia_se:.2f}, wrist joints' armature x{self.wrist_scale:.2f} "
-                f"+- {self.wrist_se:.2f}, pan/lift/elbow armature x{self.base_scale:.2f} +- {self.base_se:.2f}: explains {self.explained:.0%} of A's departure "
+                f"+- {self.wrist_se:.2f}, base joints' armature x{self.base_scale:.2f} +- {self.base_se:.2f}: explains {self.explained:.0%} of A's departure "
                 f"from the identity")
 
 
@@ -230,9 +237,10 @@ def fit_tool_error(arm, q, model_tool, A, A_se=None, scale=None, floor=0.02, fit
 
 
 def sensitivity(arm, q, tool, com_step=0.01, mass_step=0.1, wrist_scales=(0.5, 0.25, 0.1), reference_armature=None, reference_label="reference armature"):
-    """The A of a tool `com_step` metres off along each axis, of one `mass_step` kg heavier, of one whose inertia is half and a quarter of the model's, and --
-    when the arm's armature is known -- of wrist joints 1-3 whose inertia is `wrist_scales` times the model's: {label: A}. With `reference_armature` (one value per joint, a published table
-    for the arm) one more case, labelled `reference_label`, whose joints have that armature."""
+    """The (6, 6) A of `tool` (`Tool`) at posture `q` ((n,) rad, base-to-tip on `arm`: `ArmModel`) when shifted by `com_step` (> 0, m) along each
+    axis, made `mass_step` (> 0, kg) heavier, with inertia scaled by 0.5 and 0.25, and -- when `arm.armature` is known -- with the distal wrist
+    joints' (`min(3, n)`) armature scaled by each factor in `wrist_scales`: returns `{label: A}`. With `reference_armature` ((n,) kg m^2) adds one
+    more case labelled `reference_label`."""
     cases = {f"CoM {sign}{axis} {com_step * 1e3:.0f} mm": replace(tool, com=tool.com + sign_value * com_step * np.eye(3)[k])
              for k, axis in enumerate("xyz") for sign, sign_value in (("+", 1.0), ("-", -1.0))}
     cases[f"mass +{mass_step * 1e3:.0f} g"] = replace(tool, mass=tool.mass + mass_step)
@@ -260,13 +268,62 @@ def _pose(origin):
     return matrix
 
 
-def distal_tool(model_path, wrist_link, end_effector_link):
-    """The tool of an arm in a gafro model YAML: every link beyond the wrist (`wrist_link`, a link name, itself excluded) -- the gripper, or a camera and its
-    mount -- lumped into one mass, centre of mass and inertia about it, in the frame of `end_effector_link`, at the zero configuration (the tool
-    does not move relative to the end effector, unless it has joints of its own, which the zero configuration freezes)."""
-    import yaml
+def _urdf_origin(element):
+    xyz = [float(x) for x in (element.get("xyz") if element is not None and element.get("xyz") else "0 0 0").split()]
+    rpy = [float(x) for x in (element.get("rpy") if element is not None and element.get("rpy") else "0 0 0").split()]
+    qx, qy, qz, qw = Rotation.from_euler("xyz", rpy).as_quat()
+    return {"position": {"x": xyz[0], "y": xyz[1], "z": xyz[2]}, "orientation": {"x": float(qx), "y": float(qy), "z": float(qz), "w": float(qw)}}
 
-    system = yaml.safe_load(open(model_path))["system"]
+
+def _load_system(model_path):
+    """Load `{"links": ..., "joints": ...}` from either a gafro model YAML or a URDF XML file at `model_path`."""
+    path_str = str(model_path)
+    with open(model_path, encoding="utf-8") as handle:
+        head = handle.read(256).lstrip()
+        handle.seek(0)
+        if path_str.endswith((".urdf", ".xml")) or head.startswith("<"):
+            import xml.etree.ElementTree as ET
+
+            root = ET.parse(handle).getroot()
+            links, joints = {}, {}
+            for link in root.findall("link"):
+                lname = link.get("name")
+                entry = {"joints": []}
+                inertial = link.find("inertial")
+                if inertial is not None:
+                    mass_el, inertia_el = inertial.find("mass"), inertial.find("inertia")
+                    mass_val = float(mass_el.get("value", 0.0)) if mass_el is not None else 0.0
+                    if mass_val > 0.0 and inertia_el is not None:
+                        entry["inertial"] = {
+                            "mass": mass_val,
+                            "origin": _urdf_origin(inertial.find("origin")),
+                            "inertia": {k: float(inertia_el.get(f"i{k}", 0.0)) for k in ("xx", "xy", "xz", "yy", "yz", "zz")},
+                        }
+                links[lname] = entry
+            for joint in root.findall("joint"):
+                jname = joint.get("name")
+                parent = joint.find("parent").get("link")
+                child = joint.find("child").get("link")
+                dyn = joint.find("dynamics")
+                arm_el = joint.find("armature")
+                arm_val = float(dyn.get("armature", 0.0)) if dyn is not None and dyn.get("armature") else (
+                    float(arm_el.get("value", 0.0)) if arm_el is not None else 0.0
+                )
+                joints[jname] = {"name": jname, "parent_link": parent, "child_link": child, "origin": _urdf_origin(joint.find("origin")),
+                                 "dynamics": {"armature": arm_val}}
+                links.setdefault(parent, {"joints": []})["joints"].append(jname)
+            return {"links": links, "joints": joints}
+        import yaml
+
+        return yaml.safe_load(handle)["system"]
+
+
+def distal_tool(model_path, wrist_link, end_effector_link):
+    """The tool of an arm in a gafro model YAML or URDF XML at `model_path`: every link beyond the wrist (`wrist_link`, a link name, itself excluded)
+    -- the gripper, or a camera and its mount -- lumped into one `Tool` (mass, centre of mass and inertia about it), in the frame of
+    `end_effector_link` (must lie in the subtree rooted at `wrist_link`), at the zero configuration (the tool does not move relative to the end
+    effector, unless it has joints of its own, which the zero configuration freezes)."""
+    system = _load_system(model_path)
     links, joints = system["links"], {j["name"]: j for j in system["joints"].values()}
     wrist, end_effector = wrist_link, end_effector_link
     if wrist not in links:
@@ -299,11 +356,13 @@ def distal_tool(model_path, wrist_link, end_effector_link):
     return Tool(mass, com, inertia)
 
 
-def joint_armature(model_path, arm, joint_names):
-    """The armature (kg m^2, `dynamics: armature`) the model YAML at `model_path` gives each of `joint_names` (full names, e.g.
-    'right_ur5e/wrist_1_joint', ordered base-to-tip to match `ArmModel.q`): the reflected rotor inertia that is part of every joint's mass-matrix
-    diagonal. 0 for a joint that states none. (`arm` is unused, kept for caller compatibility.)"""
-    import yaml
+def joint_armature(model_path, arm_or_joint_names, joint_names=None):
+    """The armature (kg m^2, `dynamics: armature`) the model YAML or URDF XML at `model_path` gives each joint in `joint_names` (full names, e.g.
+    `'openarm_left_joint1'` or `'right_ur5e/wrist_1_joint'`, ordered base-to-tip to match `ArmModel.q`): the reflected rotor inertia that is part of
+    every joint's mass-matrix diagonal. 0 for a joint that states none.
 
-    joints = yaml.safe_load(open(model_path))["system"]["joints"]
+    Accepts either `joint_armature(model_path, joint_names)` or legacy `joint_armature(model_path, arm, joint_names)`."""
+    if joint_names is None:
+        joint_names = arm_or_joint_names
+    joints = _load_system(model_path)["joints"]
     return np.array([float((joints[name].get("dynamics") or {}).get("armature", 0.0)) for name in joint_names])

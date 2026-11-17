@@ -219,3 +219,180 @@ def test_legacy_run_signature_compatibility():
     assert not dropped
     assert len(played) == 1
 
+
+def test_run_keyword_arguments_and_spsa_perturb():
+    class QuickAdapter:
+        def __init__(self):
+            self.q = np.zeros(3)
+            self.qd = np.zeros(3)
+
+        def get_state(self):
+            return run.JointState(self.q.copy(), self.qd.copy(), np.zeros(3))
+
+        def follow_path(self, times, positions, velocities=None, **play):
+            import time
+
+            self.q = np.asarray(positions[-1], dtype=float)
+            if velocities is not None and len(velocities) > 1:
+                self.qd = np.asarray(velocities[len(velocities) // 2], dtype=float)
+            time.sleep(0.015)
+            return run.FollowResult(ok=True, status="OK")
+
+    adapter = QuickAdapter()
+    res = run.go_to(adapter, target=np.array([0.1, 0.0, 0.0]), play={"gain": 1.0}, minimum=0.005)
+    assert res.ok
+    plan = af.PassPlan(joint=0, direction=1, speed=0.2, start=0.0, constant=0.02, ramp=0.005)
+    played, dropped = run.run(adapter, plans=[plan], play={}, hold=np.zeros(3), period=0.001, tolerance=0.2, minimum_move=0.005)
+    assert not dropped and len(played) == 1
+
+    z0 = friction_opt.to_logit(np.full(14, 0.5))
+    z_plus, z_minus, ck, delta = friction_opt.spsa_perturb(z0, k=0, seed=42)
+    # Quadratic loss around z_target = 0.2
+    z_target = np.full(14, 0.2)
+    cost_p = float(np.sum((z_plus - z_target) ** 2))
+    cost_m = float(np.sum((z_minus - z_target) ** 2))
+    z1, _, _, delta_used = friction_opt.spsa_step(z0, cost_p, cost_m, k=0, delta=delta)
+    assert np.array_equal(delta, delta_used)
+    assert np.linalg.norm(z1 - z_target) < np.linalg.norm(z0 - z_target)
+
+
+def test_opendubs_urdf_distal_tool_and_armature():
+    import pathlib
+
+    urdf_path = pathlib.Path(__file__).resolve().parents[2] / "opendubs" / "description" / "openarm" / "urdf" / "v1.urdf"
+    if not urdf_path.is_file():
+        pytest.skip("opendubs v1.urdf not present")
+
+    # Lump fingers beyond openarm_left_link7 in the frame of openarm_left_hand_tcp
+    fingers_tool = payload.distal_tool(urdf_path, "openarm_left_link7", "openarm_left_hand_tcp")
+    assert fingers_tool.mass == pytest.approx(2 * 0.03602545343277134, rel=1e-4)
+    assert fingers_tool.inertia.shape == (3, 3)
+
+    # Lump link7 + fingers beyond openarm_left_link6 in the frame of openarm_left_hand_tcp
+    hand_tool = payload.distal_tool(urdf_path, "openarm_left_link6", "openarm_left_hand_tcp")
+    assert hand_tool.mass == pytest.approx(0.4659771327380578 + 2 * 0.03602545343277134, rel=1e-4)
+
+    joint_names = [f"openarm_left_joint{i}" for i in range(1, 8)]
+    armature = payload.joint_armature(urdf_path, joint_names)
+    assert armature.shape == (7,)
+
+
+def test_opendubs_mujoco_sim_integration():
+    import pathlib
+    import sys
+
+    opendubs_root = pathlib.Path(__file__).resolve().parents[2] / "opendubs"
+    sim_dir = opendubs_root / "sim"
+    venv_site = opendubs_root / ".venv" / "lib" / "python3.12" / "site-packages"
+    if venv_site.is_dir() and str(venv_site) not in sys.path:
+        sys.path.insert(0, str(venv_site))
+    if sim_dir.is_dir() and str(sim_dir) not in sys.path:
+        sys.path.insert(0, str(sim_dir))
+
+    mujoco = pytest.importorskip("mujoco")
+    scene = pytest.importorskip("scene")
+
+    m = scene.build(None)
+    d = mujoco.MjData(m)
+    jids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"oa_openarm_left_joint{i}") for i in range(1, 8)]
+    qpos_idx = [m.jnt_qposadr[j] for j in jids]
+    dof_idx = [m.jnt_dofadr[j] for j in jids]
+    limits = [(float(m.jnt_range[j, 0]), float(m.jnt_range[j, 1])) for j in jids]
+    site_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, "oa_openarm_left_ee_site")
+
+    def fk(q):
+        d.qpos[qpos_idx] = q
+        mujoco.mj_kinematics(m, d)
+        return d.site_xpos[site_id].copy(), d.site_xmat[site_id].reshape(3, 3).copy()
+
+    def mass_matrix(q):
+        d.qpos[qpos_idx] = q
+        mujoco.mj_forward(m, d)
+        full_m = np.zeros((m.nv, m.nv))
+        mujoco.mj_fullM(m, d, full_m)
+        return full_m[np.ix_(dof_idx, dof_idx)] + np.diag(np.full(7, 0.05))
+
+    arm = payload.ArmModel(fk=fk, mass_matrix=mass_matrix, armature=np.full(7, 0.05))
+    model_tool = payload.Tool(mass=0.1, com=np.array([0.0, 0.0, 0.02]), inertia=np.eye(3) * 1e-4)
+    real_tool = payload.Tool(mass=0.35, com=np.array([0.015, -0.01, 0.03]), inertia=np.eye(3) * 1e-4)
+
+    # 1. Singular straight-down posture q=0 must raise a clear ValueError instead of silent numerical corruption
+    with pytest.raises(ValueError, match="singular"):
+        payload.Posture(arm, np.zeros(7), model_tool)
+
+    # 2. Non-singular posture on the 7-DOF OpenDubs arm accurately computes A and recovers the 250g + CoM tool error
+    q_bent = np.radians([10.0, -30.0, 15.0, 60.0, -10.0, 25.0, 10.0])
+    a_true = payload.loop_gain(arm, q_bent, model_tool, real_tool)
+    err = payload.fit_tool_error(arm, q_bent, model_tool, a_true, fit_armature=False)
+    assert err.mass_error == pytest.approx(0.25, abs=1e-2)
+    assert np.allclose(err.com_error, [0.015, -0.01, 0.01], atol=5e-3)
+    assert "base joints' armature" in str(err)
+
+    # 3. End-to-end sweep analysis + 6-DOF plant identification using the OpenDubs arm's true A matrix
+    gains = identify.PoseGains.uniform(omega=18.0, zeta=0.8)
+    sweep_cfg = response.Sweep(amplitude=0.01, f_start=0.5, f_end=6.0, duration=4.0, ramp=0.4)
+    dt = 0.002
+    wall = np.arange(0.0, sweep_cfg.total, dt)
+    u_sig = sweep_cfg.value(wall)
+
+    class _SimPath:
+        def __init__(self, dof, sweep):
+            self.dof = dof
+            self.sweep = sweep
+
+    class _SimSegment:
+        def __init__(self, dof, sweep, log, period):
+            self.kind = "sweep"
+            self.label = f"sweep_{dof}"
+            self.complete = True
+            self.period = period
+            self.log = log
+            self._path = _SimPath(dof, sweep)
+
+        def path(self):
+            return self._path
+
+    class _SimRecord:
+        def __init__(self, segments):
+            self.segments = segments
+
+    # Analysing a single-axis sweep through analysis.analyse_arrays -> ResponseSet.from_analysis -> fit_plant
+    log = [(float(t), float(t)) for t in wall[::5]]
+    seg = _SimSegment("z", sweep_cfg, log, period=5 * dt)
+    disp = np.zeros((len(wall), 6))
+    disp[:, 2] = u_sig  # unity tracking along z for pipeline verification
+    seg_results = analysis.analyse_arrays(_SimRecord([seg]), wall, disp, points=12)
+    rset = identify.ResponseSet.from_analysis(seg_results, feedforward="off")
+    assert rset.swept == ["z"]
+
+    # 4. Actuator friction scheduling & limit checking against OpenDubs 7-DOF joint limits, plus MuJoCo friction recovery
+    centre = np.array([0.5 * (lo + hi) for lo, hi in limits])
+    plans, skipped = af.schedule(joints=[0, 3, 6], speeds=[0.2, 0.5], centre=centre, travel_limit=0.5, min_duration=0.4)
+    af.check_limits(plans, limits, margin=0.05)
+
+    # Simulate the constant-speed passes using OpenDubs's MuJoCo damping (0.4 N m s/rad) + frictionloss (0.1 N m) + gravity (qfrc_bias)
+    d.qpos[qpos_idx] = centre
+    mujoco.mj_forward(m, d)
+    coulomb_sim = float(m.dof_frictionloss[dof_idx[3]])
+    viscous_sim = float(m.dof_damping[dof_idx[3]])
+    gravity_sim = float(d.qfrc_bias[dof_idx[3]])
+
+    played = []
+    for p in [pl for pl in plans if pl.joint == 3]:
+        t_p, pos_p, vel_p, _ = af.pass_path(p, centre, period=0.005)
+        qd_j = vel_p[:, 3]
+        tau_p = np.zeros_like(pos_p)
+        tau_p[:, 3] = gravity_sim + np.sign(qd_j) * coulomb_sim + viscous_sim * qd_j
+        rec = run.recording(np.column_stack([t_p, pos_p, vel_p, tau_p]), 7)
+        w = af.steady_window(t_p, qd_j, p, tolerance=0.1)
+        assert w is not None
+        played.append((af.Pass(p.joint, p.direction, p.speed, *w), rec))
+
+    jnames = run.joint_names(7)
+    table = af.identify_recordings(played, joint_names=jnames, torque="tau{}", velocity="qd{}", stamp="t")
+    nums = af.as_numbers(table, jnames)["4"]
+    assert nums["coulomb"] == pytest.approx(coulomb_sim, abs=1e-3)
+    assert nums["viscous"] == pytest.approx(viscous_sim, abs=1e-3)
+    assert nums["gravity_error"] == pytest.approx(gravity_sim, abs=1e-3)
+
+

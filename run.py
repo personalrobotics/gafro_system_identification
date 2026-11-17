@@ -52,7 +52,7 @@ class RobotAdapter(Protocol):
         ...
 
 
-class GafroNodeAdapter:
+class GafroNodeAdapter(RobotAdapter):
     """Wraps an in-process `gafro_control_nodes.RobotNode` and arm name as a `RobotAdapter`."""
 
     def __init__(self, node, arm):
@@ -146,47 +146,69 @@ def joint_names(count):
     return tuple(str(j + 1) for j in range(count))
 
 
-def go_to(robot, *args, seconds=None, speed=0.3, minimum=2.0):
+def go_to(robot, *args, target=None, play=None, seconds=None, speed=0.3, minimum=2.0):
     """Move to the joint vector `target` ((N,) rad) along a straight line at about `speed` (> 0, rad/s) (at least `minimum` > 0 s, or exact
     `seconds` > 0), forwarding `play` (dict or None) kwargs to `follow_path`.
 
-    Call forms (`target` and `play` are positional-only via `*args` and cannot be passed by keyword):
-      - `go_to(robot, target[, play], seconds=..., speed=..., minimum=...)` where `robot` is a `RobotAdapter`
-      - legacy `go_to(robot, arm, target[, play], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
+    Call forms:
+      - `go_to(robot, target, play=None, seconds=..., speed=..., minimum=...)` where `robot` is a `RobotAdapter` (`target` and `play` may be
+        passed positionally or by keyword)
+      - legacy `go_to(robot, arm, target, play=None, ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
-        target = args[0]
-        play = args[1] if len(args) > 1 else None
+        if len(args) >= 1:
+            target = args[0]
+        if len(args) >= 2:
+            play = args[1]
     else:
-        arm, target = args[0], args[1]
-        play = args[2] if len(args) > 2 else None
+        if not args:
+            raise TypeError("legacy go_to(node, arm, target, ...) requires `arm` as the second positional argument")
+        arm = args[0]
+        if len(args) >= 2:
+            target = args[1]
+        if len(args) >= 3:
+            play = args[2]
         adapter = GafroNodeAdapter(robot, arm)
+    if target is None:
+        raise TypeError("go_to() missing required argument: 'target'")
     here = np.asarray(adapter.get_state().position, dtype=float).ravel()
     seconds = seconds or max(minimum, float(np.abs(np.asarray(target) - here).max()) / speed)
     return adapter.follow_path([0.0, seconds], [here, np.asarray(target, dtype=float)], **(play or {}))
 
 
-def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
-    """Play one `actuator_friction.PassPlan`, returning `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it while
+def play_pass(robot, *args, plan=None, play=None, hold=None, period=0.002, tolerance=0.1, minimum_move=2.0):
+    """Play one `actuator_friction.PassPlan` (`plan`), returning `(Pass or None, Recording, FollowResult, why)`: go to its first pose, play it while
     sampling at `period` (> 0, s), and read its steady window with relative `tolerance` (> 0).
 
     `hold` is the (N,) joint vector (rad) for un-driven joints (None samples current position); `play` is a dict or None of `follow_path` kwargs;
     `minimum_move` (> 0, s) is the minimum duration for moving to the start pose. `why` is None when there is a window and otherwise says what
     happened.
 
-    Call forms (`arm`, `plan`, `play`, and `hold` are positional-only via `*args` and cannot be passed by keyword):
-      - `play_pass(robot, plan[, play[, hold]], period=..., tolerance=..., minimum_move=...)` where `robot` is a `RobotAdapter`
-      - legacy `play_pass(robot, arm, plan[, play[, hold]], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
+    Call forms:
+      - `play_pass(robot, plan, play=None, hold=None, period=..., tolerance=..., minimum_move=...)` where `robot` is a `RobotAdapter` (`plan`,
+        `play`, and `hold` may be passed positionally or by keyword)
+      - legacy `play_pass(robot, arm, plan, play=None, hold=None, ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
-        plan = args[0]
-        play = args[1] if len(args) > 1 else None
-        hold = args[2] if len(args) > 2 else None
+        if len(args) >= 1:
+            plan = args[0]
+        if len(args) >= 2:
+            play = args[1]
+        if len(args) >= 3:
+            hold = args[2]
     else:
-        arm, plan = args[0], args[1]
-        play = args[2] if len(args) > 2 else None
-        hold = args[3] if len(args) > 3 else None
+        if not args:
+            raise TypeError("legacy play_pass(node, arm, plan, ...) requires `arm` as the second positional argument")
+        arm = args[0]
+        if len(args) >= 2:
+            plan = args[1]
+        if len(args) >= 3:
+            play = args[2]
+        if len(args) >= 4:
+            hold = args[3]
         adapter = GafroNodeAdapter(robot, arm)
+    if plan is None:
+        raise TypeError("play_pass() missing required argument: 'plan'")
     if hold is None:
         hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     first = np.array(hold, dtype=float)
@@ -207,31 +229,41 @@ def play_pass(robot, *args, period=0.002, tolerance=0.1, minimum_move=2.0):
     return af.Pass(plan.joint, plan.direction, plan.speed, *window), taken, result, None
 
 
-def run(robot, *args, hold=None, period=0.002, on_pass=None, minimum_move=2.0):
+def run(robot, *args, plans=None, play=None, hold=None, period=0.002, tolerance=0.1, on_pass=None, minimum_move=2.0):
     """Play every `actuator_friction.PassPlan` in `plans`; returns `(played, dropped)` with `played` = [(Pass, Recording)] for
     `identify_recordings` and `dropped` = [(plan, why)].
 
     The other joints stay where they were when the run began (`hold` (N,) rad, or the measured pose if None). `play` is a dict or None of
-    `follow_path` kwargs; `period` (> 0, s) is the sampler interval; `on_pass(plan, stretch_or_none, why_or_none)` is an optional callback after
-    each pass. A move the adapter refuses or stops is not retried: it is dropped with its reason, and the arm has held where it is, so the next
-    pass starts from there.
+    `follow_path` kwargs; `period` (> 0, s) is the sampler interval; `tolerance` (> 0) is the relative steady-speed window tolerance;
+    `on_pass(plan, stretch_or_none, why_or_none)` is an optional callback after each pass. A move the adapter refuses or stops is not retried: it
+    is dropped with its reason, and the arm has held where it is, so the next pass starts from there.
 
-    Call forms (`arm`, `plans`, and `play` are positional-only via `*args` and cannot be passed by keyword):
-      - `run(robot, plans[, play], hold=..., period=..., on_pass=..., minimum_move=...)` where `robot` is a `RobotAdapter`
-      - legacy `run(robot, arm, plans[, play], ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
+    Call forms:
+      - `run(robot, plans, play=None, hold=..., period=..., tolerance=..., on_pass=..., minimum_move=...)` where `robot` is a `RobotAdapter`
+        (`plans` and `play` may be passed positionally or by keyword)
+      - legacy `run(robot, arm, plans, play=None, ...)` where `robot` is a `gafro_control_nodes.RobotNode`"""
     if isinstance(robot, RobotAdapter):
         adapter = robot
-        plans = args[0]
-        play = args[1] if len(args) > 1 else None
+        if len(args) >= 1:
+            plans = args[0]
+        if len(args) >= 2:
+            play = args[1]
     else:
-        arm, plans = args[0], args[1]
-        play = args[2] if len(args) > 2 else None
+        if not args:
+            raise TypeError("legacy run(node, arm, plans, ...) requires `arm` as the second positional argument")
+        arm = args[0]
+        if len(args) >= 2:
+            plans = args[1]
+        if len(args) >= 3:
+            play = args[2]
         adapter = GafroNodeAdapter(robot, arm)
+    if plans is None:
+        raise TypeError("run() missing required argument: 'plans'")
     if hold is None:
         hold = np.asarray(adapter.get_state().position, dtype=float).ravel()
     played, dropped = [], []
     for plan in plans:
-        stretch, taken, result, why = play_pass(adapter, plan, play, hold, period=period, minimum_move=minimum_move)
+        stretch, taken, result, why = play_pass(adapter, plan, play, hold, period=period, tolerance=tolerance, minimum_move=minimum_move)
         (played.append((stretch, taken)) if stretch is not None else dropped.append((plan, why)))
         if on_pass:
             on_pass(plan, stretch, why)

@@ -32,8 +32,8 @@ class Sweep:
     ramp: float = 3.0
 
     def __post_init__(self):
-        if not 0.0 < self.f_start < self.f_end or self.duration <= 0.0 or self.ramp <= 0.0:
-            raise ValueError(f"need 0 < f_start < f_end and positive duration and ramp: {self}")
+        if self.amplitude <= 0.0 or not 0.0 < self.f_start < self.f_end or self.duration <= 0.0 or self.ramp <= 0.0:
+            raise ValueError(f"need positive amplitude, 0 < f_start < f_end, and positive duration and ramp: {self}")
 
     @property
     def total(self):
@@ -113,8 +113,10 @@ class FrequencyResponse:
         return -self.phase / (2.0 * np.pi * self.frequency)
 
     def bandwidth(self, level_db=-3.0, reference=None):
-        """The first frequency (Hz) at which the gain has fallen `level_db` from `reference` (default: the gain at the lowest
-        frequencies, the median of the first three points), found by interpolating the gain in dB; None if it does not."""
+        """The first frequency (Hz) at which the gain has fallen `level_db` (< 0, dB) from `reference` (default: the gain at the lowest
+        frequencies, the median of the first three points), found by interpolating the gain in dB; None if `frequency` is empty or never falls below."""
+        if self.frequency.size == 0:
+            return None
         reference = float(np.median(self.gain[:3])) if reference is None else reference
         below = self.gain_db < 20.0 * np.log10(reference) + level_db
         if not below.any():
@@ -165,7 +167,8 @@ def frequency_response(t, u, y, sweep, t0=0.0, frequencies=None, points=24, cycl
     if s.shape != t.shape:
         raise ValueError("sweep_time must have the length of t")
     if frequencies is None:
-        frequencies = np.geomspace(sweep.f_start * 2 ** 0.25, sweep.f_end / 2 ** 0.25, points)
+        margin = min(0.25, 0.2 * float(np.log2(sweep.f_end / sweep.f_start)))
+        frequencies = np.geomspace(sweep.f_start * 2 ** margin, sweep.f_end / 2 ** margin, points)
     seconds_per_octave = sweep.duration * np.log(2.0) / np.log(sweep.f_end / sweep.f_start)
     kept, responses, qualities = [], [], []
     for f in np.asarray(frequencies, dtype=float):
@@ -210,6 +213,9 @@ def tone_response(s, u, y, frequency, others=()):
     amplitudes at that frequency in a joint least-squares fit of it and of `others` (iterable of distinct non-zero Hz frequencies present in the signals,
     e.g. the figure eight's other tones) with a constant and a drift. Returns (response, quality), the quality in [0, 1] as in FrequencyResponse.
     For a reference made of tones over a whole number of their cycles."""
+    s, u, y = (np.asarray(a, dtype=float) for a in (s, u, y))
+    if not s.shape == u.shape == y.shape:
+        raise ValueError("s, u and y must have the same length")
     frequencies = [frequency, *others]
     c_in, _ = _tone_fit(s, u, frequencies)
     c_out, quality = _tone_fit(s, y, frequencies)

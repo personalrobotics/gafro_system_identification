@@ -36,6 +36,10 @@ class PassPlan:
     constant: float  # s at the steady speed
     ramp: float = RAMP  # s of acceleration, and of braking
 
+    def __post_init__(self):
+        if self.direction not in (-1, 1) or self.speed <= 0.0 or self.constant < 0.0 or self.ramp <= 0.0:
+            raise ValueError(f"need direction in (-1, 1), speed > 0, constant >= 0, and ramp > 0: {self}")
+
     @property
     def travel(self):
         """The rad covered at the steady speed."""
@@ -52,9 +56,8 @@ class PassPlan:
 
 
 def stretch_profile(speed, constant, ramp=RAMP):
-    """(position, velocity, total) of a pass as functions of the time since it began: ramp up, `constant` seconds at `speed`, ramp down.
-
-    `position` is the distance covered (>= 0), `total` the duration."""
+    """`(position(t), velocity(t), total_s)` callables for a pass of positive `speed` (rad/s): `ramp` (> 0, s) up, `constant` (>= 0, s) at `speed`,
+    `ramp` down. `position(t)` is the unsigned distance covered (rad, >= 0) and `total` is `2 * ramp + constant` (s)."""
     total = 2.0 * ramp + constant
 
     def velocity(time_):
@@ -76,9 +79,8 @@ def stretch_profile(speed, constant, ramp=RAMP):
 
 
 def plan_stretches(speeds, travel_limit, min_duration, ramp=RAMP):
-    """([(speed, constant seconds, covered rad)], [speed]): the speeds whose pass covers at most `travel_limit` rad, and those that would cover more.
-
-    Each kept pass holds its speed for `min_duration` seconds."""
+    """`([(speed, constant_s, covered_rad)], [skipped_speed])`: the positive `speeds` (rad/s) whose pass (`min_duration` >= 0 s at steady speed,
+    `ramp` > 0 s at each end) covers at most `travel_limit` (> 0, rad), and those that would exceed it."""
     kept, skipped = [], []
     for speed in speeds:
         constant = max(min_duration, 0.0)
@@ -91,7 +93,7 @@ def plan_stretches(speeds, travel_limit, min_duration, ramp=RAMP):
 
 
 def reach(plan):
-    """(lowest, highest) joint position the pass visits."""
+    """`(lowest_rad, highest_rad)` joint positions visited by `plan` (`PassPlan`)."""
     end = plan.start + plan.displacement
     return min(plan.start, end), max(plan.start, end)
 
@@ -205,9 +207,9 @@ class Recording:
 
 
 def read_recording(path):
-    """A per-goal recording CSV (header, then rows) as a `Recording`."""
-    with open(path, newline="") as handle:
-        names = next(csv.reader(handle))
+    """A per-goal recording CSV at `path` (header row, then numeric sample rows) as a `Recording`."""
+    with open(path, newline="", encoding="utf-8") as handle:
+        names = [n.strip() for n in next(csv.reader(handle))]
     return Recording(names, np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2))
 
 

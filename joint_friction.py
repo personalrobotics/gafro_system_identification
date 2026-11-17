@@ -40,9 +40,10 @@ JOINTS = ("shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist
 
 
 def scales_of(entry, n_joints=6):
-    """(viscous, coulomb) per joint that the configuration commanded: `off`, or {viscous: [n_joints], coulomb: [n_joints]}.
+    """`(viscous, coulomb)` (each `(n_joints,)` float array in `[0, 1]`) that the configuration `entry` commanded: `"off"`/`False`, or
+    `{"viscous": [n_joints], "coulomb": [n_joints]}`.
 
-    `robot` has none. The controller chose them, and they are not a measured parameter."""
+    `"robot"` has none: the controller chose them, and they are not a measured parameter."""
     if isinstance(entry, dict):
         return np.asarray(entry["viscous"], dtype=float), np.asarray(entry["coulomb"], dtype=float)
     if entry == "off" or entry is False:  # YAML reads a bare `off` as false; the driver treats that as off too
@@ -53,7 +54,7 @@ def scales_of(entry, n_joints=6):
 
 
 def commanded_scales(entry, n_joints=6):
-    """(viscous, coulomb) the configuration sent, or None for `robot`."""
+    """`(viscous, coulomb)` arrays of length `n_joints` sent by configuration `entry`, or `None` when `entry == "robot"`."""
     if entry == "robot":
         return None
     return scales_of(entry, n_joints=n_joints)
@@ -71,24 +72,27 @@ class Pass:
 
 
 def read_cycles(path):
-    """The cycle log as (column names, array): rows are control cycles."""
-    with open(path, newline="") as handle:
-        names = next(csv.reader(handle))
+    """The cycle log CSV at `path` as `(column_names, cycles_2d_array)`: rows are control cycles."""
+    with open(path, newline="", encoding="utf-8") as handle:
+        names = [n.strip() for n in next(csv.reader(handle))]
     return names, np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
 
 
 def steady_state(names, cycles, group, stretch, middle=0.5, joint_names=JOINTS):
     """(mean command, mean velocity, torque std, samples) of `stretch`'s middle `middle` (in (0, 1]) share, for the joint it drove.
 
-    `names` is the list of CSV column names, `cycles` is the (N, cols) array, `group` is the control group's name (e.g. `right_ur5e`; columns
-    `command_<group>/<joint>_joint` and `qd_<...>`), `stretch` is a `Pass`, and `joint_names` is indexed by `stretch.joint`."""
-    suffix = f"{group}/{joint_names[stretch.joint]}_joint"
+    `names` is the list of CSV column names, `cycles` is the (N, cols) array, `group` is the control group's name (e.g. `right_ur5e` or `""`; tries
+    `<group>/<joint>_joint`, `<group>/<joint>`, then `<joint>` for `command_*` and `qd_*` columns), `stretch` is a `Pass`, and `joint_names` is
+    indexed by `stretch.joint`."""
+    jname = joint_names[stretch.joint]
+    candidates = ([f"{group}/{jname}_joint", f"{group}/{jname}"] if group else []) + [f"{jname}_joint", jname]
+    suffix = next((c for c in candidates if f"command_{c}" in names and f"qd_{c}" in names), candidates[0])
     command, velocity = names.index(f"command_{suffix}"), names.index(f"qd_{suffix}")
     stamp = cycles[:, names.index("wall_time")]
     length = stretch.end - stretch.begin
     keep = (stamp >= stretch.begin + 0.5 * (1.0 - middle) * length) & (stamp <= stretch.end - 0.5 * (1.0 - middle) * length)
     if keep.sum() < 10:
-        raise ValueError(f"joint {joint_names[stretch.joint]}, {stretch.direction:+d} {stretch.speed} rad/s: {int(keep.sum())} cycles in the window")
+        raise ValueError(f"joint {jname}, {stretch.direction:+d} {stretch.speed} rad/s: {int(keep.sum())} cycles in the window")
     return float(cycles[keep, command].mean()), float(cycles[keep, velocity].mean()), float(cycles[keep, command].std()), int(keep.sum())
 
 
